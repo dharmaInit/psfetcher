@@ -151,6 +151,8 @@ def getitems(dealurl, pagenumber, minprice=0, maxprice=10000):
 		except KeyError:
 			rawdata.update({"price": "None"})
 			roundPrice = 0.1
+		except AttributeError:
+			roundPrice = 0.1
 		try:
 			discount = li.select("div .discount-badge__container.psw-l-anchor")
 			rawdata.update({"discount": discount[0].text})
@@ -515,7 +517,7 @@ if __name__ == "__main__":
 				const=storelist, dest="storelist",
 				help=helpMessagePool["list"])
 	optionalArg.add_argument("-v", "--version", action="version",
-				version="%(prog)s 1.0.0",
+				version="%(prog)s 1.0.1",
 				help=helpMessagePool["version"])
 	optionalArg.add_argument('-h', '--help', action='help',
 				default=argparse.SUPPRESS,

@@ -115,7 +115,9 @@ def itercount(deal, dealurl, unrealpage=100):
 	"""
 	try:
 		soup = webparser(dealurl + str(unrealpage))
-		lastPage = int(soup.select("div .ems-sdk-grid-paginator__page-button")[-1].text)
+		lastPageClass = ".ems-sdk-grid-paginator__button.ems-sdk-grid-paginator__number-button"
+		lastPageClass += ".psw-button.psw-content-button"
+		lastPage = int(soup.select("div {}".format(lastPageClass))[-1].text)
 		return lastPage
 	except IndexError:
 		print("deal '{}' has a single item, skipping".format(deal))
@@ -517,7 +519,7 @@ if __name__ == "__main__":
 				const=storelist, dest="storelist",
 				help=helpMessagePool["list"])
 	optionalArg.add_argument("-v", "--version", action="version",
-				version="%(prog)s 1.0.1",
+				version="%(prog)s 1.0.2",
 				help=helpMessagePool["version"])
 	optionalArg.add_argument('-h', '--help', action='help',
 				default=argparse.SUPPRESS,

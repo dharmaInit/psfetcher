@@ -1,4 +1,7 @@
- # psfetcher
+20FEB21. Major site code revamp. Working on a fix.
+
+
+# psfetcher
  Fetch deals or search for game titles in a PS Store
 
  # Features:

@@ -511,7 +511,7 @@ if __name__ == "__main__":
 				help=helpMessagePool["help"])
 
 	args = parser.parse_args()
-	country = args.country
+	country = args.store
 	lang = args.lang
 	getAll = args.alldeals
 	argQuery = args.query

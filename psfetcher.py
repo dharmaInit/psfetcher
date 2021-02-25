@@ -458,7 +458,7 @@ if __name__ == "__main__":
 			formatter_class=argparse.RawTextHelpFormatter)
 	requiredArg = parser.add_argument_group("required argument")
 	optionalArg = parser.add_argument_group("optional arguments")
-	requiredArg.add_argument("-s", "--country", metavar="xx",
+	requiredArg.add_argument("-s", "--store", metavar="xx",
 				type=str, choices=countries,
 				help=helpMessagePool["country"])
 	optionalArg.add_argument("-l", "--lang", metavar="xx",

@@ -1,7 +1,4 @@
-20FEB21. Major site code revamp. Working on a fix.
-
-
-# psfetcher
+ # psfetcher
  Fetch deals or search for game titles in a PS Store
 
  # Features:
@@ -10,10 +7,11 @@
   - multi-store support
   - sort results by title, price, or discount
   - filter results by setting minimum and/or maximum prices
-  - save results as a text file, a reddit-friendly comment, or a simply formatted HTML document
+  - filter results by content type - games and/or addons
+  - save results as a text file, a reddit-friendly comment, an HTML document, or an XLSX spreadsheet
 
  # Installation and requirements
- Required Python version is 3+. 4 external libraries need to be installed manually:
+ Required Python version is 3+. External libraries need to be installed manually:
 
  `pip install -r requirements.txt`
 
@@ -55,6 +53,13 @@
     subsequent pages mostly contain items having separate words from the query as their title
 
    ## Filters:
+   To narrow results by content type, pass 'game' and/or 'addon' to `--type`. Virtual currency has its own category, 'currency'.
+   
+    What is considered as a 'game':
+     ['Full Game, Game Bundle, Premium Edition, Bundle, Demo']
+    What is considered as an 'addon':
+     ['Add-On Pack, Add-on, Character, Level, Vehicle, Map, Costume, Item, Season Pass']
+  
    To narrow results by a custom price range, pass a natural number that denotes a local currency's value to `-f / --from` and/or `-u / --under`.
 
     Might not work as intended in some stores, as a decimal separator's placement differs depending on a country's standards.
@@ -75,8 +80,9 @@
    - `-r / --reddit`, to save results as a reddit-friendly comment
       - automatic split into multiple comments before reaching character limit (10000)
    - `-w / --web`, to save results as a simple HTML document
+   - `-x / --xlsx`, to save results as an XLSX spreadsheet
 
-   A Reddit comment and an HTML document will contain direct title links to a store while a text file will not.
+   A Reddit comment, an HTML document and an XLSX spreadsheet will contain direct store links while a plain text file will not.
 
   ## Misc 
    PS Store no longer shows deals' written names on https://store.playstation.com/yy-xx/deals. However, names are still present in site code and they are mostly the same for all stores (except for the "All Deals" deal, which is often translated to a store's language). "Games Under x" type of deals are not translated and are generally the same with one confusing bit - the x's currency is USD, even if a store's currency is different.
@@ -87,5 +93,7 @@
 
    ### What's in thoughts but not in the works:
    - a GUI version
-   - separation by content type (games vs DLCs). Requires an external database for filtering results, as that option got removed with the revamp of PS Store 
+   - ~~separation by content type (games vs DLCs). Requires an external database for filtering results, as that option got removed with the revamp of PS Store~~
+      - done as of version 1.0.3
    - separation by platform (PS4 and PS5). Not useful as of now, as PS5 titles are currently at the minimum
+      - written but not implemented due to the reason above

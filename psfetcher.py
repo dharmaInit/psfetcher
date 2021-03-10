@@ -111,28 +111,29 @@ def getdeals(lang, country, fetchall=False):
 
 
 def itercount(dealurl):
-	"""Return deal's total number of pages and items.
+	"""Return deal's total number of pages, items, and number of items per page.
 
 	Parameters:
 	dealurl (str): deal's local url
 	"""
 	try:
 		soup = webparser(dealurl + str(1))
-		totalCountReg = re.compile(r"(\"totalCount\"):(\d+)")
-		totalCount = int(totalCountReg.search(soup.prettify()).group(2))
-		# 48 items per full page
-		if totalCount <= 48:
+		totalCountReg = re.compile(r"(\"totalCount\"):(\d+),(\"offset\"):(\d+),(\"size\"):(\d+)")
+		regResults = totalCountReg.search(soup.prettify())
+		totalCount = int(regResults.group(2))
+		pageSize = int(regResults.group(6))
+		if totalCount <= pageSize:
 			totalPages = 1
-		elif totalCount > 48:
+		elif totalCount > pageSize:
 			# round up
-			totalPages = -(-totalCount // 48)
-		return totalCount, totalPages
+			totalPages = -(-totalCount // pageSize)
+		return totalCount, totalPages, pageSize
 	except (IndexError, AttributeError):
-		return None, None
+		return None, None, None
 
 
 def getitems(
-	dealurl=None, pagenumber=None, query=None, lang=None,
+	dealurl=None, pagenumber=None, pagesize=0, query=None, lang=None,
 	country=None, ctype=None, minprice=0, maxprice=10000
 ):
 	"""Return two lists: a list of dictionaries, and a list of tuples.
@@ -144,6 +145,7 @@ def getitems(
 	Parameters:
 	dealurl (str): deal's local url
 	pagenumber (int): deal's page number
+	pagenumber (int): number of item per page
 	query (str): a search phrase
 	lang (str): 2-letter language code
 	country (str): 2-letter country code
@@ -172,8 +174,8 @@ def getitems(
 		dealId = dealurl.split("/")[-2]
 		continueFrom = 0
 		if pagenumber > 1:
-			continueFrom = pagenumber * 48 - 48
-		categoryJs = "CategoryGrid:{}:{}-{}:{}:48".format(dealId, lang, country, continueFrom)
+			continueFrom = pagenumber * pagesize - pagesize
+		categoryJs = "CategoryGrid:{}:{}-{}:{}:{}".format(dealId, lang, country, continueFrom, pagesize)
 		for i in productIdTree[categoryJs]["products"]:
 			productIds.append(i["id"])
 	elif query:
@@ -643,11 +645,11 @@ if __name__ == "__main__":
 			querySwitch = False
 			p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
 			for deal, dealurl in deals:
-				itemcount, pages = itercount(dealurl)
+				itemcount, pages, pageSize = itercount(dealurl)
 				try:
 					datalists = p.starmap_async(getitems, zip(
 						repeat(dealurl), range(1, pages + 1),
-						repeat(None),
+						repeat(pageSize), repeat(None),
 						repeat(lang), repeat(country),
 						repeat(ctypes),
 						repeat(minprice), repeat(maxprice)

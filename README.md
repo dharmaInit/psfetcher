@@ -1,9 +1,9 @@
  # psfetcher
- Fetch deals or search for game titles in a PS Store
+ Fetch deals or search for game titles in PS Store
 
  # Features:
   - fetch deals
-  - search for a game title
+  - search for game titles
   - multi-store support
   - sort results by title, price, or discount
   - filter results by setting minimum and/or maximum prices
@@ -25,7 +25,9 @@
 
  Pass the language code to `-l / --lang` and the country code to `-s / --store`.
 
- By default `-l / --lang` is set to 'en', meaning English; however, not all stores support it. To see which language code goes with which country code, use `--list`.
+ By default `-l / --lang` is set to 'en', meaning English; however not all stores support it. To see which language code goes with which country code, use `--list`.
+ 
+ To entirely skip `-l` and `-s` parameters, set both codes in `preferences.json`
 
    ## Deals:
    To get results of a single deal, enter its index in the interactive mode that will list all deals. To choose more than one deal, separate indexes by space.
@@ -44,12 +46,12 @@
    To search for a game title, pass the argument to `-q / --query`.
 
    - title can be wrapped in quotes or be without them
-   - only one title at a time can be queried
+   - multiple titles at a time can be queried - separate them by a comma
    - the query is case-insensitive; however, the queried phrase should be present completely in that order in a possible match
    - to get better results, use a game's title without "x edition", "dlc", etc., as they will likely be included
      - e.g., if the game's title is "The Horror of Fetcher: 2020 Game of the Year Edition",
        and the query is "the horror of fetcher game of the year edition", it will yield no result. "the horror of fetcher" will suffice
-   - the only fetched results are from the first page, as they're most relevant. 
+   - the only fetched results are from the first page, as they're the most relevant. 
     subsequent pages mostly contain items having separate words from the query as their title
 
    ## Filters:
@@ -87,13 +89,9 @@
   ## Misc 
    PS Store no longer shows deals' written names on https://store.playstation.com/yy-xx/deals. However, names are still present in site code and they are mostly the same for all stores (except for the "All Deals" deal, which is often translated to a store's language). "Games Under x" type of deals are not translated and are generally the same with one confusing bit - the x's currency is USD, even if a store's currency is different.
    
-   Some titles from a deal can be present more than one time - they are filtered out.
-   
-   Fetching the same deal at different times can yield slightly different results. Any deal has been observed to have a fixed number of titles, however, due to some titles being present more than one time, some unique titles are left out. For example, a deal has 5 items. Included items are: 1, 2, 3, 4, 4. 5 is left out. So the end, unique result is 1, 2, 3, 4. But on subsequent attempts item '5' can pop up in the deal, something else might be dropped, or everything can be unique. This conclusion might not be entirely accurate.
-
+ All fetched data is saved to a local SQLite database. If a deal is queried multiple times, old data from the previous run will be used (applicable to deals only; search results are always new). To ignore old data and fetch everything again from PS Store, use `-i / --ignore` option. After some time, when a deal is no longer active, it is advised to delete the old database file.
+ 
    ### What's in thoughts but not in the works:
    - a GUI version
-   - ~~separation by content type (games vs DLCs). Requires an external database for filtering results, as that option got removed with the revamp of PS Store~~
-      - done as of version 1.0.3
    - separation by platform (PS4 and PS5). Not useful as of now, as PS5 titles are currently at the minimum
       - written but not implemented due to the reason above

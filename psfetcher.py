@@ -1,17 +1,22 @@
 from itertools import repeat
-from operator import itemgetter
 import os
 import sys
+import sqlite3
 import argparse
 import json
 import multiprocessing
 import re
 import time
-import yaml
 import bs4
 import requests
 from more_itertools import unique_everseen
 import openpyxl
+
+
+PSFETCHER = os.path.dirname(os.path.realpath(__file__))
+DBFILE = os.path.join(PSFETCHER, "psfetcher.db")
+CONFIG = os.path.join(PSFETCHER, "lang.json")
+PREFERENCES_CONFIG = os.path.join(PSFETCHER, "preferences.json")
 
 
 def webparser(url):
@@ -72,42 +77,34 @@ def getdeals(lang, country, fetchall=False):
 			name = footerDeal.text.lower()
 		url = footerDeal.a.get("href").strip("1")
 		deals.extend([(name, url)])
-	try:
-		deals = []
-		mainpage = "https://store.playstation.com/{}-{}/deals".format(lang, country)
-		soup = webparser(mainpage)
-		topDeals = soup.select("div .ems-sdk-collection")[0]
-		if topDeals != []:
-			for deal in topDeals.find_all("li"):
-				name = deal.img.get("alt").replace("[PROMO] ", "").lower()
-				url = deal.a.get("href").strip("1")
-				if "product" in url:
-					print("skipping a single item deal '{}'".format(name))
-					continue
-				# a deal url within a deal url
-				if "- web" in name:
-					name = name.replace("- web", "").strip()
-					footerDeals(name, webparser(url))
-				else:
-					deals.extend([(name, url)])
-		# "all deals" deal
-		footerDeals(None, soup)
-		if deals != []:
-			if not fetchall:
-				[print(ind + 1, deal[0]) for ind, deal in enumerate(deals)]
-				choices = choiceCheck(maxval=len(deals))
-				deals = [deals[i-1] for i in choices]
+	deals = []
+	mainpage = "https://store.playstation.com/{}-{}/deals".format(lang, country)
+	soup = webparser(mainpage)
+	topDeals = soup.select("div .ems-sdk-collection")[0]
+	if topDeals != []:
+		for deal in topDeals.find_all("li"):
+			name = deal.img.get("alt").replace("[PROMO] ", "").lower()
+			url = deal.a.get("href").strip("1")
+			if "product" in url:
+				print("skipping a single item deal '{}'".format(name))
+				continue
+			# a deal url within a deal url
+			if "- web" in name:
+				name = name.replace("- web", "").strip()
+				footerDeals(name, webparser(url))
 			else:
-				print("fetching all deals:")
-				[print(" *", i[0]) for i in deals]
-			return deals
-	except IndexError as err:
-		if deals == []:
-			errorMessage = "can't fetch anything at the moment, sorry.\nerror: "
-			errorMessage += str(err)
-			errorMessage += "\nlikely there are some site code changes"
-			print(errorMessage)
-			sys.exit()
+				deals.extend([(name, url)])
+	# "all deals" deal
+	footerDeals(None, soup)
+	if deals != []:
+		if not fetchall:
+			[print(ind + 1, deal[0]) for ind, deal in enumerate(deals)]
+			choices = choiceCheck(maxval=len(deals))
+			deals = [deals[i-1] for i in choices]
+		else:
+			print("fetching all deals:")
+			[print(" *", i[0]) for i in deals]
+		return deals
 
 
 def itercount(dealurl):
@@ -133,30 +130,24 @@ def itercount(dealurl):
 
 
 def getitems(
-	dealurl=None, pagenumber=None, pagesize=0, query=None, lang=None,
-	country=None, ctype=None, minprice=0, maxprice=10000
+	dealurl=None, deal=None, pagenumber=None,
+	pagesize=0, query=None, lang=None, country=None
 ):
-	"""Return two lists: a list of dictionaries, and a list of tuples.
-
-	Each dict in the first list contains information about a specific item.
-	The second list is a tuple of maximum length values (title, price) from the whole page.
-	If it's a query, results are only from page 1.
+	"""Return None. Write all results to the SQL database.
 
 	Parameters:
 	dealurl (str): deal's local url
+	deal (str): deal's name
 	pagenumber (int): deal's page number
-	pagenumber (int): number of item per page
+	pagesize (int): number of items per page
 	query (str): a search phrase
 	lang (str): 2-letter language code
 	country (str): 2-letter country code
-	ctype (list): a list of all selected content types
-	minprice (int): minimum price of a title
-	maxprice (int): maximum price of a title
 	"""
-	results = []
-	lenPair = []
-	productIds = []
-	noCurrencyReg = re.compile(r"[0-9,.\s]+")
+	global DBFILE
+
+	sys.stderr.write("\033[K" + "fetching page {}".format(pagenumber) + "\r")
+	sys.stderr.flush()
 
 	if dealurl:
 		soup = webparser(dealurl + str(pagenumber))
@@ -168,6 +159,7 @@ def getitems(
 	dataDump = json.loads(soup.find("script", id="__NEXT_DATA__").string)
 	productIdTree = dataDump["props"]["apolloState"]
 
+	productIds = []
 	if dealurl:
 		# unique child 'CategoryGrid' for json tree:
 		# a deal id + lang + country + total number of items already shown
@@ -185,48 +177,49 @@ def getitems(
 				(productId.endswith(locale) or productId.endswith(":en-us")):
 				productIds.append(productId)
 
+	noCurrencyReg = re.compile(r"[0-9,.\s]+")
+	connection = sqlite3.connect(DBFILE)
+	c = connection.cursor()
+	c.execute(
+		"create table if not exists psfetcher \
+		(id integer primary key autoincrement, titleid blob, title blob, price blob, \
+		discount blob, roundprice real, type blob, deal blob, pagenumber integer)"
+	)
+
 	for productId in productIds:
 		itemInfo = dataDump["props"]["apolloState"][productId]
 		if query:
 			if not query.lower() in itemInfo["name"].lower():
 				continue
-		rawdata = {}
-		rawdata["type"] = itemInfo["localizedStoreDisplayClassification"]
-		if ctype:
-			if rawdata["type"] not in ctype:
-				continue
-		rawdata["id"] = itemInfo["id"]
-		rawdata["name"] = itemInfo["name"]
 		priceId = itemInfo["price"]["id"]
 		priceJs = dataDump["props"]["apolloState"][priceId]
-		rawdata["price"] = priceJs["discountedPrice"]
-		rawdata["discount"] = str(priceJs["discountText"])
 		try:
-			price = noCurrencyReg.search(rawdata["price"]).group()
+			price = noCurrencyReg.search(priceJs["discountedPrice"]).group()
 			price = price.translate(str.maketrans({" ": None, ",": "."}))
 			# fix decimal separator rounding issue: if len after dec. sep. position is >= 3
-			decSepPos = price.find(".") + 1
-			if len(price[decSepPos:]) >= 3:
+			decSepPosition = price.find(".") + 1
+			if len(price[decSepPosition:]) >= 3:
 				price = price.replace(".", "")
 			roundPrice = round(float(price), 2)
 		except (KeyError, AttributeError, ValueError):
 			roundPrice = 0.1
-
-		if minprice < roundPrice < maxprice:
-			rawdata["name"] = rawdata["name"].strip()
-			lenTitlePrice = (len(rawdata["name"]), len(rawdata["price"]))
-			lenPair.append(lenTitlePrice)
-			rawdata.update({"roundprice": roundPrice})
-			results.append(rawdata)
-	lenPair = [max(i) for i in zip(*lenPair)]
-	return results, lenPair
+		c.execute(
+			"insert into psfetcher (titleid, title, price, roundprice, discount, type, deal, pagenumber) \
+			values (?, ?, ?, ?, ?, ?, ?, ?)", (
+				itemInfo["id"], itemInfo["name"].strip(),
+				priceJs["discountedPrice"], roundPrice,
+				str(priceJs["discountText"]),
+				itemInfo["localizedStoreDisplayClassification"], deal, pagenumber
+			)
+		)
+	connection.commit()
 
 
 def printitems(itemlist, tlen=0, plen=0, table=False):
 	"""Return None. Print formatted results from itemlist.
 
 	Parameters:
-	itemlist (list): data list of items (dicts) returned from getitems()
+	itemlist (list): data list of items (dicts)
 	tlen (int): title length value used for justification
 	plen (int): price length value used for justification
 	table (bool): if True, will print table-like results
@@ -237,7 +230,7 @@ def printitems(itemlist, tlen=0, plen=0, table=False):
 		if table:
 			print("-" * round(len(header)))
 		itemline = "{} | {} | {}".format(
-			item["name"].ljust(tlen),
+			item["title"].ljust(tlen),
 			item["price"].ljust(plen),
 			item["discount"])
 		print(itemline)
@@ -250,7 +243,7 @@ def writetext(
 	"""Return filename of a file to which all output has been saved.
 
 	Parameters:
-	itemlist (list): data list of items (dicts) returned from getitems()
+	itemlist (list): data list of items (dicts)
 	lang (str): 2-letter language code
 	country (str): 2-letter country code
 	tlen (int): title length value used for justification
@@ -267,7 +260,7 @@ def writetext(
 			if table:
 				output.write("-" * round(len(header)) + "\n")
 			itemline = "{} | {} | {}\n".format(
-				item["name"].ljust(tlen),
+				item["title"].ljust(tlen),
 				item["price"].ljust(plen),
 				item["discount"])
 			output.write(itemline)
@@ -281,7 +274,7 @@ def writereddit(
 	"""Return filename of a file to which all output has been saved.
 
 	Parameters:
-	itemlist (list): data list of items (dicts) returned from getitems()
+	itemlist (list): data list of items (dicts)
 	lang (str): 2-letter language code
 	country (str): 2-letter country code
 	filename (str): save output to 'filename'
@@ -296,7 +289,7 @@ def writereddit(
 		output.write(header)
 		for item in itemlist:
 			itemline = "\n[{}]({}) | {} | {}".format(
-				item["name"],
+				item["title"],
 				"https://store.playstation.com/{}-{}/product/".format(lang, country) + item["id"],
 				item["price"],
 				item["discount"])
@@ -315,7 +308,7 @@ def writehtml(
 	"""Return filename of a file to which all output has been saved.
 
 	Parameters:
-	itemlist (list): data list of items (dicts) returned from getitems()
+	itemlist (list): data list of items (dicts)
 	lang (str): 2-letter language code
 	country (str): 2-letter country code
 	filename (str): save output to 'filename'
@@ -375,7 +368,7 @@ def writehtml(
 		for item in itemlist:
 			output.write(tRow.format(
 				productUrl, item["id"],
-				item["name"], item["price"], item["discount"]
+				item["title"], item["price"], item["discount"]
 				)
 			)
 		output.write(footer)
@@ -409,7 +402,7 @@ def writexlsx(
 	for ind, item in enumerate(itemlist):
 		ind += 3
 		url = productUrl + item["id"]
-		cells = {"A": item["name"], "B": item["price"], "C": item["discount"], "D": url}
+		cells = {"A": item["title"], "B": item["price"], "C": item["discount"], "D": url}
 		for cell, data in cells.items():
 			sheet[cell + str(ind)] = data
 	wb.save(filename)
@@ -417,157 +410,197 @@ def writexlsx(
 
 
 if __name__ == "__main__":
-	PSFETCHER = os.path.dirname(os.path.realpath(__file__))
-	CONFIG = "lang.yaml"
-	CONFIG = os.path.join(PSFETCHER, CONFIG)
 	if not os.path.isfile(CONFIG) or not os.access(CONFIG, os.R_OK):
 		print("ensure you have '{}' with at least read access".format(CONFIG))
 		sys.exit()
-	with open(CONFIG) as config:
-		allconf = yaml.load(config, Loader=yaml.FullLoader)
+
+	with open(CONFIG, "r") as config:
+		allconf = json.loads(config.read())
 	allstores = {}
 	allcontent = {}
 	for lang in allconf.keys():
 		allstores[lang] = allconf[lang]["country"]
 		allcontent[lang] = allconf[lang]["content"]
+	del allconf
 	countries = [country for sList in allstores.values() for country in sList]
-
-	helpMessagePool = {
-		"country": "2-letter country code",
-		"language": "2-letter language code (default is en)",
-		"alldeals": "choose all available deals without entering the interactive mode",
-		"query": "search for a title in a store (page 1 results only)",
-		"minprice": "title's minimum price",
-		"maxprice": "title's maximum price",
-		"sort": "sort results by price, title, or discount",
-		"reverse": "reversed --sort results",
-		"type": "show only specific content type(s)",
-		"writetext": "save results as a text file",
-		"writereddit": "save results as a reddit-friendly comment",
-		"writehtml": "save results as an HTML document",
-		"writexlsx": "save results as an XLSX spreadsheet",
-		"noPrintSwitch": "don't print the results",
-		"tablePrintSwitch": "table-like printed/saved results",
-		"list": "list all language and country codes",
-		"version": "show script's version and exit",
-		"help": "show this help message and exit"
-	}
 
 	parser = argparse.ArgumentParser(
 			prog="psfetcher",
-			description="Fetch deals or search for game titles in a PS Store",
+			description="Fetch deals or search for game titles in PS Store",
 			usage="%(prog)s -s xx [option]", add_help=False,
 			formatter_class=argparse.RawTextHelpFormatter)
 	requiredArg = parser.add_argument_group("required argument")
 	optionalArg = parser.add_argument_group("optional arguments")
-	requiredArg.add_argument("-s", "--store", metavar="xx",
-				type=str, choices=countries,
-				help=helpMessagePool["country"])
-	optionalArg.add_argument("-l", "--lang", metavar="xx",
-				type=str, choices=list(allstores.keys()), default="en",
-				help=helpMessagePool["language"])
-	optionalArg.add_argument("-a", "--alldeals", action="store_true",
-				help=helpMessagePool["alldeals"])
-	optionalArg.add_argument("-q", "--query", metavar="title",
-				type=str, nargs="+",
-				help=helpMessagePool["query"])
-	optionalArg.add_argument("-f", "--from", dest="min", metavar="N",
-				type=int, default=0,
-				help=helpMessagePool["minprice"])
-	optionalArg.add_argument("-u", "--under", dest="max", metavar="N",
-				type=int, default=100000,
-				help=helpMessagePool["maxprice"])
-	optionalArg.add_argument("--type", nargs='+',
-				choices=["game", "addon", "currency"],
-				help=helpMessagePool["type"]),
-	optionalArg.add_argument("--sort", nargs='+',
-				choices=["price", "title", "discount"],
-				metavar="{price, title, discount}",
-				help=helpMessagePool["sort"])
-	optionalArg.add_argument("--reverse", action="store_true",
-				help=helpMessagePool["reverse"])
-	optionalArg.add_argument("-t", "--txt", action="store_const",
-				const=writetext, dest="writetext",
-				help=helpMessagePool["writetext"])
-	optionalArg.add_argument("-r", "--reddit", action="store_const",
-				const=writereddit, dest="writereddit",
-				help=helpMessagePool["writereddit"])
-	optionalArg.add_argument("-w", "--web", action="store_const",
-				const=writehtml, dest="writehtml",
-				help=helpMessagePool["writehtml"])
-	optionalArg.add_argument("-x", "--xlsx", action="store_const",
-				const=writexlsx, dest="writexlsx",
-				help=helpMessagePool["writexlsx"])
-	optionalArg.add_argument("-n", "--noprint", action="store_true",
-				help=helpMessagePool["noPrintSwitch"])
-	optionalArg.add_argument("--table", action="store_true",
-				help=helpMessagePool["tablePrintSwitch"])
-	optionalArg.add_argument("--list", action="store_true",
-				dest="storeslist",
-				help=helpMessagePool["list"])
-	optionalArg.add_argument("-v", "--version", action="version",
-				version="%(prog)s 1.0.3",
-				help=helpMessagePool["version"])
-	optionalArg.add_argument('-h', '--help', action='help',
-				default=argparse.SUPPRESS,
-				help=helpMessagePool["help"])
+	requiredArg.add_argument(
+		"-s", "--store", metavar="xx",
+		type=str, choices=countries,
+		help="2-letter country code"
+	)
+	requiredArg.add_argument(
+		"-l", "--lang", metavar="xx",
+		type=str, choices=list(allstores.keys()),
+		help="2-letter language code"
+	)
+	optionalArg.add_argument(
+		"-a", "--alldeals", action="store_true",
+		help="select all available deals"
+	)
+	optionalArg.add_argument(
+		"-q", "--query", metavar="title", type=str, nargs="+",
+		help="search for a title (page 1 results only)")
+	optionalArg.add_argument(
+		"-f", "--from", dest="min", metavar="N",
+		type=int, default=0,
+		help="title's minimum price"
+	)
+	optionalArg.add_argument(
+		"-u", "--under", dest="max", metavar="N",
+		type=int, default=100000,
+		help="title's maximum price"
+	)
+	optionalArg.add_argument(
+		"--type", nargs='+',
+		choices=["game", "addon", "currency"],
+		help="show only specific content type(s)"
+	)
+	optionalArg.add_argument(
+		"--sort", nargs='+',
+		choices=["price", "title", "discount"],
+		metavar="{price, title, discount}",
+		help="sort results by price, title, or discount"
+	)
+	optionalArg.add_argument(
+		"--reverse", action="store_true",
+		help="reversed --sort results"
+	)
+	optionalArg.add_argument(
+		"-t", "--txt", action="store_const",
+		const=writetext, dest="writetext",
+		help="save results as a text file"
+	)
+	optionalArg.add_argument(
+		"-r", "--reddit", action="store_const",
+		const=writereddit, dest="writereddit",
+		help="save results as a reddit-friendly comment"
+	)
+	optionalArg.add_argument(
+		"-w", "--web", action="store_const",
+		const=writehtml, dest="writehtml",
+		help="save results as an HTML document"
+	)
+	optionalArg.add_argument(
+		"-x", "--xlsx", action="store_const",
+		const=writexlsx, dest="writexlsx",
+		help="save results as an XLSX spreadsheet"
+	)
+	optionalArg.add_argument(
+		"-n", "--noprint", action="store_true",
+		help="don't print the results"
+	)
+	optionalArg.add_argument(
+		"--table", action="store_true",
+		help="table-like printed/saved results"
+	)
+	optionalArg.add_argument(
+		"-i", "--ignore", action="store_true",
+		help="ignore old results"
+	)
+	optionalArg.add_argument(
+		"--list", action="store_true",
+		dest="storeslist",
+		help="list all language and country codes")
+	optionalArg.add_argument(
+		"-v", "--version", action="version",
+		version="%(prog)s 1.0.4",
+		help="show script's version and exit"
+	)
+	optionalArg.add_argument(
+		'-h', '--help', action='help',
+		default=argparse.SUPPRESS,
+		help="show this help message and exit"
+	)
 
 	args = parser.parse_args()
 	country = args.store
 	lang = args.lang
-	getAll = args.alldeals
 	argQuery = args.query
 	argSortingList = args.sort
-	argReverse = args.reverse
 	argContentTypes = args.type
 	minprice = args.min
 	maxprice = args.max
 	tablePrintSwitch = args.table
 	noPrintSwitch = args.noprint
+	ignoreSwitch = args.ignore
+	reverseSwitch = args.reverse
+	getAllSwitch = args.alldeals
 	writetext = args.writetext
 	writereddit = args.writereddit
 	writehtml = args.writehtml
 	writexlsx = args.writexlsx
 
-	# list all and exit
 	if args.storeslist:
 		print("language", "|", "country")
 		for lang, country in allstores.items():
 			print(lang.ljust(len("language")), "|", " ".join(country))
 		sys.exit()
 
-	# country and lang sanity check
+	if os.path.isfile(PREFERENCES_CONFIG) and os.access(PREFERENCES_CONFIG, os.R_OK):
+		with open(PREFERENCES_CONFIG, "r") as config:
+			try:
+				prefconf = json.loads(config.read())
+			except json.decoder.JSONDecodeError:
+				print("{} doesn't follow JSON syntax".format(PREFERENCES_CONFIG))
+				sys.exit()
+
+			if not lang and prefconf["language"] is not None:
+				lang = prefconf["language"]
+				if lang not in allstores.keys():
+					print("wrong language set in preferences")
+					sys.exit()
+			if not country and prefconf["country"] is not None:
+				country = prefconf["country"]
+				if country not in countries:
+					print("wrong country set in preferences")
+					sys.exit()
+
 	if not country:
 		print("specify the country code")
+		sys.exit()
+	if not lang:
+		print("specify the language code")
 		sys.exit()
 	if country not in allstores[lang]:
 		print("can't combine language code '{}' with country code '{}'".format(lang, country))
 		sys.exit()
-
-	# price sanity check
 	if 0 > minprice or minprice > maxprice or \
 		(minprice > maxprice and maxprice != parser.get_default('max')):
 		print("there there now, be a dear and fix those prices")
 		sys.exit()
 
-	# apply content filter: doesn't go to fillterMessages() because it's pre-processing
-	ctypes = []
-	contentMes = None
-	if argContentTypes:
-		for ctype in argContentTypes:
-			ctypes += allcontent[lang][ctype]
-		contentMes = "content: {}".format(", ".join(argContentTypes))
-
 	def filenameMaker(name, lang, country, ext=None, query=False):
 		exts = {writereddit: "reddit.txt", writehtml: "html", writexlsx: "xlsx", writetext: "txt"}
-		name = name.replace(" ", ".").replace("-", ".")
+		name = name.replace("- ", "").replace(" ", ".")
 		filename = "{}.{}.{}.{}".format(name, lang, country, exts[ext])
 		if query:
 			filename = "query." + filename
 		return filename.lower()
 
-	def filterMessages():
-		# price range filter message
+	def getSQL(cursor=True):
+		global DBFILE
+		if cursor:
+			return sqlite3.connect(DBFILE).cursor()
+		return sqlite3.connect(DBFILE)
+
+	def cleanupOldFetch(deal):
+		c = getSQL(cursor=False)
+		c.cursor().execute("delete from psfetcher where deal = ?", (deal,))
+		c.commit()
+
+	def selectData(deal):
+		global argSortingList, argContentTypes, allcontent, minprice, maxprice
+		contentMes = None
+		sortMes = None
+
 		priceRangeMes = "price range: "
 		if minprice != parser.get_default('min'):
 			priceRangeMes += "from {} ".format(minprice)
@@ -576,49 +609,91 @@ if __name__ == "__main__":
 		if len(priceRangeMes) == 13:
 			priceRangeMes = None
 
-		# sorting by price, title and discount + message
-		sortMes = None
-		global argSortingList
+		select = "select title, price, discount, titleid from psfetcher"
+		select += " where roundprice between {} and {} and deal = '{}'".format(minprice, maxprice, deal)
+
+		if argContentTypes:
+			ctypes = []
+			for ctype in argContentTypes:
+				ctypes += allcontent[lang][ctype]
+			placeholders = "?" * len(ctypes)
+			placeholders = ",".join(placeholders)
+			select += " and psfetcher.type in ({})".format(placeholders)
+			contentMes = "content: {}".format(", ".join(argContentTypes))
 		if argSortingList:
 			argSortingList = list(unique_everseen(argSortingList))
-			sortingHat = {"price": "roundprice", "title": "name", "discount": "discount"}
-			sortingUnique = [sortingHat[i] for i in argSortingList]
-			data.sort(key=itemgetter(*sortingUnique), reverse=argReverse)
+			sortingList = ["roundprice" if i == "price" else i for i in argSortingList]
+			order = {False: " asc", True: " desc"}
+			order = order[reverseSwitch]
+			select += " order by " + "{}, ".format(order).join(sortingList) + order
 			sortMes = "sorted by {}".format(" then by ".join(argSortingList))
-			if argReverse:
+			if reverseSwitch:
 				sortMes += " in reverse"
 
-		today = time.strftime("%Y %b %d")
-		filterMessage = "{} titles | generated at {}".format(len(data), today)
-		for message in (sortMes, priceRangeMes, contentMes):
-			if message:
+		try:
+			c = getSQL()
+			titleSelect = "select length(title) from psfetcher where deal = ? order by length(title) desc limit 1"
+			maxTitleLen, = c.execute(titleSelect, (deal,)).fetchone()
+			priceSelect = "select length(price) from psfetcher where deal = ? order by length(price) desc limit 1"
+			maxPriceLen, = c.execute(priceSelect, (deal,)).fetchone()
+
+			itemlist = []
+			if argContentTypes:
+				select = c.execute(select, ctypes)
+			else:
+				select = c.execute(select)
+			for title, price, discount, titleid in select.fetchall():
+				rawdata = {}
+				rawdata["title"] = title
+				rawdata["price"] = price
+				rawdata["discount"] = discount
+				rawdata["id"] = titleid
+				itemlist.append(rawdata)
+
+			today = time.strftime("%Y %b %d")
+			filterMessage = "{} titles | generated at {}".format(len(itemlist), today)
+			messages = [m for m in (sortMes, priceRangeMes, contentMes) if m]
+			for message in messages:
 				filterMessage += " | {}".format(message)
-		return filterMessage
+			return itemlist, maxTitleLen, maxPriceLen, filterMessage
+
+		except TypeError:
+			return None, 0, 0, None
+
+	def checkOldData(deal):
+		try:
+			c = getSQL()
+			oldcount, = c.execute("select count(title) from psfetcher where deal = ?", (deal,)).fetchone()
+			if oldcount > 0:
+				totalpages, = c.execute("select max(pagenumber) from psfetcher where deal = ?", (deal,)).fetchone()
+				return oldcount, totalpages
+			return 0, 0
+		except sqlite3.OperationalError:
+			return 0, 0
 
 	# outside due to mp
 	savedMessages = []
 
 	def fullShebang(printQuery=False, printDeal=False):
-		for func in (writereddit, writehtml, writexlsx, writetext):
-			if func:
-				filename = filenameMaker(deal, lang, country, ext=func, query=querySwitch)
-				if func != writetext:
-					savedMessage = func(
-						itemlist=data, lang=lang, country=country, name=deal,
-						filename=filename, filterMessage=filterMessage
-					)
-				elif func == writetext:
-					savedMessage = func(
-						itemlist=data, tlen=lenPair[0], plen=lenPair[1],
-						lang=lang, country=country, table=tablePrintSwitch,
-						filterMessage=filterMessage, filename=filename
-					)
-				savedMessages.append(savedMessage)
+		global maxPriceLen, maxTitleLen, data
+		funcs = [func for func in (writereddit, writehtml, writexlsx, writetext) if func]
+		for func in funcs:
+			filename = filenameMaker(deal, lang, country, ext=func, query=querySwitch)
+			if func != writetext:
+				savedMessage = func(
+					itemlist=data, lang=lang, country=country, name=deal,
+					filename=filename, filterMessage=filterMessage
+				)
+			elif func == writetext:
+				savedMessage = func(
+					itemlist=data, tlen=maxTitleLen, plen=maxPriceLen,
+					lang=lang, country=country, table=tablePrintSwitch,
+					filterMessage=filterMessage, filename=filename
+				)
+			savedMessages.append(savedMessage)
 
 		if not noPrintSwitch:
-			if not printQuery:
-				print()
-			printitems(data, tlen=lenPair[0], plen=lenPair[1], table=tablePrintSwitch)
+			printitems(data, tlen=maxTitleLen, plen=maxPriceLen, table=tablePrintSwitch)
 		if printDeal:
 			printMessage = "fetched {}/{} items from the '{}' deal. pages: {}"
 			printMessage = printMessage.format(len(data), itemcount, deal, pages)
@@ -629,49 +704,52 @@ if __name__ == "__main__":
 
 	try:
 		if argQuery:
-			deal = query = " ".join(argQuery)
-			querySwitch = True
-			data, lenPair = getitems(
-				query=query, lang=lang, ctype=ctypes,
-				country=country, minprice=minprice, maxprice=maxprice
-			)
-			if data:
-				filterMessage = filterMessages()
-				fullShebang(printQuery=True)
-			else:
-				print("try another query or retweak the filters")
+			query = " ".join(argQuery).split(",")
+			query = [q for q in query if q.strip()]
+			for q in query:
+				deal = q.strip()
+				querySwitch = True
+				getitems(query=deal, deal=deal, lang=lang, country=country, pagenumber=1)
+				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal=deal)
+				if data:
+					fullShebang(printQuery=True)
+					if len(query) > 1 and q != query[-1] and not noPrintSwitch:
+						print()
+				cleanupOldFetch(deal)
 		else:
-			deals = getdeals(lang, country, fetchall=getAll)
+			try:
+				deals = getdeals(lang, country, fetchall=getAllSwitch)
+			except IndexError:
+				print("can't fetch anything. likely there are some site code changes.")
+				sys.exit()
+
 			querySwitch = False
 			p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
 			for deal, dealurl in deals:
-				itemcount, pages, pageSize = itercount(dealurl)
-				try:
-					datalists = p.starmap_async(getitems, zip(
-						repeat(dealurl), range(1, pages + 1),
-						repeat(pageSize), repeat(None),
-						repeat(lang), repeat(country),
-						repeat(ctypes),
-						repeat(minprice), repeat(maxprice)
-						)
-					).get()
-				except TypeError:
-					print("nothing for '{}'. likely due to a site code change".format(deal))
-					continue
-				data = []
-				lenPairs = []
-				for itemlist, lenPair in datalists:
-					data.extend(itemlist)
-					if lenPair != []:
-						lenPairs.extend([lenPair])
-				datalists.clear()
-				if data:
-					data = list(unique_everseen(data))
-					filterMessage = filterMessages()
-					lenPair = [max(i) for i in zip(*lenPairs)]
-					fullShebang(printDeal=True)
+				if ignoreSwitch:
+					cleanupOldFetch(deal)
+					oldcount = 0
 				else:
-					print("nothing for '{}'".format(deal))
+					oldcount, totalpages = checkOldData(deal)
+				if oldcount == 0:
+					itemcount, pages, pageSize = itercount(dealurl)
+					try:
+						p.starmap(getitems, zip(
+							repeat(dealurl), repeat(deal), range(1, pages + 1),
+							repeat(pageSize), repeat(None),
+							repeat(lang), repeat(country),
+							)
+						)
+					except TypeError:
+						continue
+				else:
+					itemcount = oldcount
+					pages = totalpages
+				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal=deal)
+				if data:
+					fullShebang(printDeal=True)
+					if len(deals) > 1 and deal != deals[-1][0] and not noPrintSwitch:
+						print()
 			p.close()
 			p.join()
 		if savedMessages:

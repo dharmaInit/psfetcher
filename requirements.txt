@@ -1,6 +1,5 @@
 beautifulsoup4==4.9.1
 lxml==4.5.1
 openpyxl==3.0.6
-PyYAML==5.3.1
 requests==2.23.0
 more-itertools==8.6.0

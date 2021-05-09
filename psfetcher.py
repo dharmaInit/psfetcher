@@ -171,19 +171,21 @@ def getitems(
 		for i in productIdTree[categoryJs]["products"]:
 			productIds.append(i["id"])
 	elif query:
+		dealId = query
 		for productId in productIdTree:
 			locale = ":{}-{}".format(lang, country)
 			if productId.startswith("Product") and \
 				(productId.endswith(locale) or productId.endswith(":en-us")):
 				productIds.append(productId)
 
+	locale = lang + country
 	noCurrencyReg = re.compile(r"[0-9,.\s]+")
 	connection = sqlite3.connect(DBFILE)
 	c = connection.cursor()
 	c.execute(
 		"create table if not exists psfetcher \
 		(id integer primary key autoincrement, titleid blob, title blob, price blob, \
-		discount blob, roundprice real, type blob, deal blob, pagenumber integer)"
+		discount blob, roundprice real, type blob, deal blob, pagenumber integer, dealid blob, locale text)"
 	)
 
 	for productId in productIds:
@@ -204,12 +206,12 @@ def getitems(
 		except (KeyError, AttributeError, ValueError):
 			roundPrice = 0.1
 		c.execute(
-			"insert into psfetcher (titleid, title, price, roundprice, discount, type, deal, pagenumber) \
-			values (?, ?, ?, ?, ?, ?, ?, ?)", (
+			"insert into psfetcher (titleid, title, price, roundprice, discount, type, deal, pagenumber, dealid, locale) \
+			values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
 				itemInfo["id"], itemInfo["name"].strip(),
 				priceJs["discountedPrice"], roundPrice,
 				str(priceJs["discountText"]),
-				itemInfo["localizedStoreDisplayClassification"], deal, pagenumber
+				itemInfo["localizedStoreDisplayClassification"], deal, pagenumber, dealId, locale
 			)
 		)
 	connection.commit()
@@ -591,12 +593,12 @@ if __name__ == "__main__":
 			return sqlite3.connect(DBFILE).cursor()
 		return sqlite3.connect(DBFILE)
 
-	def cleanupOldFetch(deal):
+	def cleanupOldFetch(dealId, locale):
 		c = getSQL(cursor=False)
-		c.cursor().execute("delete from psfetcher where deal = ?", (deal,))
+		c.cursor().execute("delete from psfetcher where dealid = ? and locale = ?", (dealId, locale))
 		c.commit()
 
-	def selectData(deal):
+	def selectData(dealId, locale):
 		global argSortingList, argContentTypes, allcontent, minprice, maxprice
 		contentMes = None
 		sortMes = None
@@ -610,7 +612,7 @@ if __name__ == "__main__":
 			priceRangeMes = None
 
 		select = "select title, price, discount, titleid from psfetcher"
-		select += " where roundprice between {} and {} and deal = '{}'".format(minprice, maxprice, deal)
+		select += " where roundprice between {} and {} and dealid = '{}' and locale = '{}'".format(minprice, maxprice, dealId, locale)
 
 		if argContentTypes:
 			ctypes = []
@@ -632,10 +634,10 @@ if __name__ == "__main__":
 
 		try:
 			c = getSQL()
-			titleSelect = "select length(title) from psfetcher where deal = ? order by length(title) desc limit 1"
-			maxTitleLen, = c.execute(titleSelect, (deal,)).fetchone()
-			priceSelect = "select length(price) from psfetcher where deal = ? order by length(price) desc limit 1"
-			maxPriceLen, = c.execute(priceSelect, (deal,)).fetchone()
+			titleSelect = "select length(title) from psfetcher where dealid = ? and locale = ? order by length(title) desc limit 1"
+			maxTitleLen, = c.execute(titleSelect, (dealId, locale)).fetchone()
+			priceSelect = "select length(price) from psfetcher where dealid = ? and locale = ? order by length(price) desc limit 1"
+			maxPriceLen, = c.execute(priceSelect, (dealId, locale)).fetchone()
 
 			itemlist = []
 			if argContentTypes:
@@ -660,12 +662,12 @@ if __name__ == "__main__":
 		except TypeError:
 			return None, 0, 0, None
 
-	def checkOldData(deal):
+	def checkOldData(dealId, locale):
 		try:
 			c = getSQL()
-			oldcount, = c.execute("select count(title) from psfetcher where deal = ?", (deal,)).fetchone()
+			oldcount, = c.execute("select count(title) from psfetcher where dealid = ? and locale = ?", (dealId, locale)).fetchone()
 			if oldcount > 0:
-				totalpages, = c.execute("select max(pagenumber) from psfetcher where deal = ?", (deal,)).fetchone()
+				totalpages, = c.execute("select max(pagenumber) from psfetcher where dealid = ? and locale = ?", (deal, locale)).fetchone()
 				return oldcount, totalpages
 			return 0, 0
 		except sqlite3.OperationalError:
@@ -703,19 +705,20 @@ if __name__ == "__main__":
 		print(printMessage)
 
 	try:
+		locale = lang + country
 		if argQuery:
 			query = " ".join(argQuery).split(",")
 			query = [q for q in query if q.strip()]
 			for q in query:
-				deal = q.strip()
+				deal = dealId = q.strip()
 				querySwitch = True
 				getitems(query=deal, deal=deal, lang=lang, country=country, pagenumber=1)
-				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal=deal)
+				data, maxTitleLen, maxPriceLen, filterMessage = selectData(dealId, locale)
 				if data:
 					fullShebang(printQuery=True)
 					if len(query) > 1 and q != query[-1] and not noPrintSwitch:
 						print()
-				cleanupOldFetch(deal)
+				cleanupOldFetch(dealId, locale)
 		else:
 			try:
 				deals = getdeals(lang, country, fetchall=getAllSwitch)
@@ -726,11 +729,12 @@ if __name__ == "__main__":
 			querySwitch = False
 			p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
 			for deal, dealurl in deals:
+				dealId = dealurl.split("/")[-2]
 				if ignoreSwitch:
-					cleanupOldFetch(deal)
+					cleanupOldFetch(dealId, locale)
 					oldcount = 0
 				else:
-					oldcount, totalpages = checkOldData(deal)
+					oldcount, totalpages = checkOldData(dealId, locale)
 				if oldcount == 0:
 					itemcount, pages, pageSize = itercount(dealurl)
 					try:
@@ -745,7 +749,7 @@ if __name__ == "__main__":
 				else:
 					itemcount = oldcount
 					pages = totalpages
-				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal=deal)
+				data, maxTitleLen, maxPriceLen, filterMessage = selectData(dealId, locale)
 				if data:
 					fullShebang(printDeal=True)
 					if len(deals) > 1 and deal != deals[-1][0] and not noPrintSwitch:

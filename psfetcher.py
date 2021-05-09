@@ -513,7 +513,7 @@ if __name__ == "__main__":
 		help="list all language and country codes")
 	optionalArg.add_argument(
 		"-v", "--version", action="version",
-		version="%(prog)s 1.0.4",
+		version="%(prog)s 1.0.5",
 		help="show script's version and exit"
 	)
 	optionalArg.add_argument(
@@ -667,7 +667,7 @@ if __name__ == "__main__":
 			c = getSQL()
 			oldcount, = c.execute("select count(title) from psfetcher where dealid = ? and locale = ?", (dealId, locale)).fetchone()
 			if oldcount > 0:
-				totalpages, = c.execute("select max(pagenumber) from psfetcher where dealid = ? and locale = ?", (deal, locale)).fetchone()
+				totalpages, = c.execute("select max(pagenumber) from psfetcher where dealid = ? and locale = ?", (dealId, locale)).fetchone()
 				return oldcount, totalpages
 			return 0, 0
 		except sqlite3.OperationalError:

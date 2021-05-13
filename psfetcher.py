@@ -513,7 +513,7 @@ if __name__ == "__main__":
 		help="list all language and country codes")
 	optionalArg.add_argument(
 		"-v", "--version", action="version",
-		version="%(prog)s 1.0.5",
+		version="%(prog)s 1.0.6",
 		help="show script's version and exit"
 	)
 	optionalArg.add_argument(
@@ -593,12 +593,12 @@ if __name__ == "__main__":
 			return sqlite3.connect(DBFILE).cursor()
 		return sqlite3.connect(DBFILE)
 
-	def cleanupOldFetch(dealId, locale):
+	def cleanupOldFetch(deal, dealId, locale):
 		c = getSQL(cursor=False)
-		c.cursor().execute("delete from psfetcher where dealid = ? and locale = ?", (dealId, locale))
+		c.cursor().execute("delete from psfetcher where dealid = ? and locale = ? and deal = ?", (dealId, locale, deal))
 		c.commit()
 
-	def selectData(dealId, locale):
+	def selectData(deal, dealId, locale):
 		global argSortingList, argContentTypes, allcontent, minprice, maxprice
 		contentMes = None
 		sortMes = None
@@ -612,7 +612,8 @@ if __name__ == "__main__":
 			priceRangeMes = None
 
 		select = "select title, price, discount, titleid from psfetcher"
-		select += " where roundprice between {} and {} and dealid = '{}' and locale = '{}'".format(minprice, maxprice, dealId, locale)
+		select += " where roundprice between {} and {}".format(minprice, maxprice)
+		select += " and dealid = '{}' and locale = '{}' and deal = '{}'".format(dealId, locale, deal)
 
 		if argContentTypes:
 			ctypes = []
@@ -634,10 +635,10 @@ if __name__ == "__main__":
 
 		try:
 			c = getSQL()
-			titleSelect = "select length(title) from psfetcher where dealid = ? and locale = ? order by length(title) desc limit 1"
-			maxTitleLen, = c.execute(titleSelect, (dealId, locale)).fetchone()
-			priceSelect = "select length(price) from psfetcher where dealid = ? and locale = ? order by length(price) desc limit 1"
-			maxPriceLen, = c.execute(priceSelect, (dealId, locale)).fetchone()
+			titleSelect = "select length(title) from psfetcher where dealid = ? and locale = ? and deal = ? order by length(title) desc limit 1"
+			maxTitleLen, = c.execute(titleSelect, (dealId, locale, deal)).fetchone()
+			priceSelect = "select length(price) from psfetcher where dealid = ? and locale = ? and deal = ? order by length(price) desc limit 1"
+			maxPriceLen, = c.execute(priceSelect, (dealId, locale, deal)).fetchone()
 
 			itemlist = []
 			if argContentTypes:
@@ -662,12 +663,14 @@ if __name__ == "__main__":
 		except TypeError:
 			return None, 0, 0, None
 
-	def checkOldData(dealId, locale):
+	def checkOldData(deal, dealId, locale):
 		try:
 			c = getSQL()
-			oldcount, = c.execute("select count(title) from psfetcher where dealid = ? and locale = ?", (dealId, locale)).fetchone()
+			oldcountSelect = "select count(title) from psfetcher where dealid = ? and locale = ? and deal = ?"
+			oldcount, = c.execute(oldcountSelect, (dealId, locale, deal)).fetchone()
 			if oldcount > 0:
-				totalpages, = c.execute("select max(pagenumber) from psfetcher where dealid = ? and locale = ?", (dealId, locale)).fetchone()
+				totalpagesSelect = "select max(pagenumber) from psfetcher where dealid = ? and locale = ? and deal = ?"
+				totalpages, = c.execute(totalpagesSelect, (dealId, locale, deal)).fetchone()
 				return oldcount, totalpages
 			return 0, 0
 		except sqlite3.OperationalError:
@@ -713,12 +716,12 @@ if __name__ == "__main__":
 				deal = dealId = q.strip()
 				querySwitch = True
 				getitems(query=deal, deal=deal, lang=lang, country=country, pagenumber=1)
-				data, maxTitleLen, maxPriceLen, filterMessage = selectData(dealId, locale)
+				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal, dealId, locale)
 				if data:
 					fullShebang(printQuery=True)
 					if len(query) > 1 and q != query[-1] and not noPrintSwitch:
 						print()
-				cleanupOldFetch(dealId, locale)
+				cleanupOldFetch(deal, dealId, locale)
 		else:
 			try:
 				deals = getdeals(lang, country, fetchall=getAllSwitch)
@@ -731,10 +734,10 @@ if __name__ == "__main__":
 			for deal, dealurl in deals:
 				dealId = dealurl.split("/")[-2]
 				if ignoreSwitch:
-					cleanupOldFetch(dealId, locale)
+					cleanupOldFetch(deal, dealId, locale)
 					oldcount = 0
 				else:
-					oldcount, totalpages = checkOldData(dealId, locale)
+					oldcount, totalpages = checkOldData(deal, dealId, locale)
 				if oldcount == 0:
 					itemcount, pages, pageSize = itercount(dealurl)
 					try:
@@ -749,7 +752,7 @@ if __name__ == "__main__":
 				else:
 					itemcount = oldcount
 					pages = totalpages
-				data, maxTitleLen, maxPriceLen, filterMessage = selectData(dealId, locale)
+				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal, dealId, locale)
 				if data:
 					fullShebang(printDeal=True)
 					if len(deals) > 1 and deal != deals[-1][0] and not noPrintSwitch:

@@ -89,8 +89,8 @@ def getdeals(lang, country, fetchall=False):
 				print("skipping a single item deal '{}'".format(name))
 				continue
 			# a deal url within a deal url
-			if "- web" in name:
-				name = name.replace("- web", "").strip()
+			if "- web" in name or "- wm" in name:
+				name = name.replace("- web", "").replace("- wm", "").strip()
 				footerDeals(name, webparser(url))
 			else:
 				deals.extend([(name, url)])
@@ -513,7 +513,7 @@ if __name__ == "__main__":
 		help="list all language and country codes")
 	optionalArg.add_argument(
 		"-v", "--version", action="version",
-		version="%(prog)s 1.0.6",
+		version="%(prog)s 1.0.7",
 		help="show script's version and exit"
 	)
 	optionalArg.add_argument(

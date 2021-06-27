@@ -118,7 +118,7 @@
  
  PS Store rehashes old URLs which are used as deal IDs in the script, which means that old results from an inactive deal could be shown. It is advised to remove old data from the database using the `flush` command if a deal is no longer active to avoid inconsistencies. 
 
- Not all titles have a platform specified in their tags. Such cases are noted under the platform column as "PS".
+ Not all titles have a platform specified in their tags. Such cases are noted under the platform column as "PS*".
  
    ### What's in thoughts but not in the works:
    - adding OpenCritic to the HTML version of the output (needs OC's agreement)

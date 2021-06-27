@@ -1,6 +1,6 @@
 # Change Log
 
-## [1.1.0] - 2021-06-2x
+## [1.1.0] - 2021-06-27
 
 New features demanded for the script to be broken into multiple sub-modules.
 

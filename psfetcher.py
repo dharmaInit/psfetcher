@@ -1,22 +1,14 @@
 from itertools import repeat
-import os
-import sys
-import sqlite3
-import argparse
+import bs4
 import json
 import multiprocessing
 import re
-import time
-import bs4
 import requests
-from more_itertools import unique_everseen
-import openpyxl
+import sqlite3
+import sys
 
-
-PSFETCHER = os.path.dirname(os.path.realpath(__file__))
-DBFILE = os.path.join(PSFETCHER, "psfetcher.db")
-CONFIG = os.path.join(PSFETCHER, "lang.json")
-PREFERENCES_CONFIG = os.path.join(PSFETCHER, "preferences.json")
+from modules import psconfig, psinfo, psparse, pssql
+from modules.globals import DBFILE
 
 
 def webparser(url):
@@ -35,33 +27,28 @@ def webparser(url):
 def choiceCheck(maxval, attempt=1, inputMessage="enter deal's index: "):
 	"""Return a list of unique, positive integers from input.
 
-	Each integer is less than or equals maxval.
-	Exit after 3 failed attempts.
+	Each integer must be less than or equal to maxval.
+	Return None after (by default) 3 failed attempts (when input is greater than maxval).
 
 	Parameters:
 	maxval (int): maximum integer value
 	attempt (int): attempt number
 	inputMessage (str): input message
 	"""
-	try:
-		messagePool = ["wait, that's illegal!", "believe in yourself", "heh, okay."]
-		choices = list(set(input(inputMessage).split()))
-		choices = [int(c) for c in choices if c.isdigit() and 0 < int(c) <= maxval]
-		if choices == []:
-			if attempt >= 3:
-				print(messagePool[-1])
-				sys.exit()
-			print(messagePool[attempt-1])
-			choices = choiceCheck(maxval, attempt=attempt+1)
-		return choices
-	except EOFError as err:
-		print("\nwhat in the world! error:", err)
-		print("likely a broken pipe")
-		sys.exit()
+	messagePool = ["wait, that's illegal!", "believe in yourself", "heh, okay."]
+	choices = list(set(input(inputMessage).split()))
+	choices = [int(c) for c in choices if c.isdigit() and 0 < int(c) <= maxval]
+	if choices == []:
+		if attempt >= 3:
+			print(messagePool[-1])
+			return None
+		print(messagePool[attempt-1])
+		choices = choiceCheck(maxval, attempt=attempt+1)
+	return choices
 
 
 def getdeals(lang, country, fetchall=False):
-	"""Return a list of tuples. Each tuple consits of a deal name and its local URL.
+	"""Return a list of tuples. Each tuple consists of a deal name and its local URL.
 
 	Parameters:
 	lang (str): 2-letter language code
@@ -69,41 +56,55 @@ def getdeals(lang, country, fetchall=False):
 	fetchall (bool): if True, will get all current deals instead of chosen ones
 	"""
 
-	def footerDeals(dealname, soup):
-		footerDeal = soup.select(".ems-sdk-strand__header")[0]
-		if dealname:
-			name = dealname
-		else:
-			name = footerDeal.text.lower()
-		url = footerDeal.a.get("href").strip("1")
-		deals.extend([(name, url)])
-	deals = []
+	def footerDeal(name=None, soup=None):
+		footerDealSoup = soup.select(".ems-sdk-strand__header")[0]
+		if not name:
+			name = footerDealSoup.text.lower()
+		url = footerDealSoup.a.get("href").strip("1")
+		return name, url
+
+	def sanitiseDeal(name=None, url=None):
+		if "product" in url:
+			print("skipping a single item deal '{}'".format(name))
+			return None, None
+
+		# a deal url within a deal url
+		dCeption = ["- web", "- wm"]
+		for level in dCeption:
+			if name.endswith(level):
+				name = name.replace(level, "").strip()
+				return name, "footer"
+
+		return name, None
+
 	mainpage = "https://store.playstation.com/{}-{}/deals".format(lang, country)
 	soup = webparser(mainpage)
-	topDeals = soup.select("div .ems-sdk-collection")[0]
-	if topDeals != []:
-		for deal in topDeals.find_all("li"):
+	storeDeals = soup.select("div .ems-sdk-collection")[0]
+	deals = []
+	if storeDeals:
+		for deal in storeDeals.find_all("li"):
 			name = deal.img.get("alt").replace("[PROMO] ", "").lower()
 			url = deal.a.get("href").strip("1")
-			if "product" in url:
-				print("skipping a single item deal '{}'".format(name))
-				continue
-			# a deal url within a deal url
-			if "- web" in name or "- wm" in name:
-				name = name.replace("- web", "").replace("- wm", "").strip()
-				footerDeals(name, webparser(url))
-			else:
+			name, placement = sanitiseDeal(name=name, url=url)
+			if placement == "footer":
+				name, url = footerDeal(name=name, soup=webparser(url))
+			if name:
 				deals.extend([(name, url)])
+
 	# "all deals" deal
-	footerDeals(None, soup)
-	if deals != []:
-		if not fetchall:
-			[print(ind + 1, deal[0]) for ind, deal in enumerate(deals)]
-			choices = choiceCheck(maxval=len(deals))
-			deals = [deals[i-1] for i in choices]
-		else:
+	name, url = footerDeal(soup=soup)
+	deals.extend([(name, url)])
+
+	if deals:
+		if fetchall:
 			print("fetching all deals:")
 			[print(" *", i[0]) for i in deals]
+		else:
+			[print(ind + 1, deal[0]) for ind, deal in enumerate(deals)]
+			choices = choiceCheck(maxval=len(deals))
+			if not choices:
+				return None
+			deals = [deals[i-1] for i in choices]
 		return deals
 
 
@@ -111,7 +112,7 @@ def itercount(dealurl):
 	"""Return deal's total number of pages, items, and number of items per page.
 
 	Parameters:
-	dealurl (str): deal's local url
+	dealurl (str): deal's local URL
 	"""
 	try:
 		soup = webparser(dealurl + str(1))
@@ -129,24 +130,84 @@ def itercount(dealurl):
 		return None, None, None
 
 
-def getitems(
-	dealurl=None, deal=None, pagenumber=None,
-	pagesize=0, query=None, lang=None, country=None
-):
-	"""Return None. Write all results to the SQL database.
+def itemPrice(dbfile=None, titleID=None, locale=None, deal=None, dealID=None):
+	"""Return None. Fetch and write results to a SQL database.
+
+	Fetches a single item's information by its ID.
 
 	Parameters:
-	dealurl (str): deal's local url
+	dbfile (str): full path to a database file
+	titleID (str): title's ID from PS Store
+	locale (str): language and country codes joined with a hyphen
+	deal (str): deal's name
+	dealID (str): deal's ID
+	"""
+	url = "https://store.playstation.com/{}/product/{}".format(locale, titleID)
+	soup = webparser(url)
+	rawdata = soup.select("script", id="mfe-jsonld-tags", type="application/ld+json")
+	jsonData = json.loads(rawdata[11].string)["cache"]
+	jsonKeys = list(jsonData.keys())
+	matchID = "GameCTA:{}".format(titleID)
+	titleStoreID = [k for k in jsonKeys if matchID in k][0]
+	priceJson = jsonData[titleStoreID]["price"]
+	try:
+		noCurrencyReg = re.compile(r"[0-9,.\s]+")
+		price = noCurrencyReg.search(priceJson["discountedPrice"]).group()
+		price = price.translate(str.maketrans({" ": None, ",": "."}))
+		decSepPosition = price.find(".") + 1
+		if len(price[decSepPosition:]) >= 3:
+			price = price.replace(".", "")
+	except (AttributeError, TypeError):
+		price = 0.1
+
+	platformKey = "Product:{}".format(titleID)
+	platform = json.loads(rawdata[10].string)["cache"][platformKey]["platforms"]
+	platform = ", ".join(platform)
+	if "PS" not in platform:
+		platform = "PS*"
+
+	roundPrice = round(float(price), 2)
+	price = str(priceJson["discountedPrice"])
+	discount = priceJson["discountText"]
+	category = json.loads(rawdata[8].string)["category"]
+	title = json.loads(rawdata[8].string)["name"]
+
+	connection = sqlite3.connect(dbfile)
+	statement = """
+	insert into psfetcher
+	(titleID, title, price, roundprice, discount,
+	type, deal, pagenumber, dealID, locale, platform)
+	values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	"""
+	connection.cursor().execute(statement, (
+		titleID, title, price, roundPrice, discount,
+		category, deal, 1, dealID, locale, platform
+		)
+	)
+	connection.commit()
+	connection.close()
+
+
+def getitems(
+	dealurl=None, deal=None, pagenumber=None,
+	pagesize=0, query=None, lang=None, country=None, dbfile=None
+):
+	"""Return None. Fetch and write results to a SQL database.
+
+	Fetches information for all items per 1 page.
+
+	Parameters:
+	dealurl (str): deal's local URL
 	deal (str): deal's name
 	pagenumber (int): deal's page number
 	pagesize (int): number of items per page
-	query (str): a search phrase
+	query (str): search phrase
 	lang (str): 2-letter language code
 	country (str): 2-letter country code
+	dbfile (str): full path to a database file
 	"""
-	global DBFILE
 
-	sys.stderr.write("\033[K" + "fetching page {}".format(pagenumber) + "\r")
+	sys.stderr.write("\033[K" + "page {}".format(pagenumber) + "\r")
 	sys.stderr.flush()
 
 	if dealurl:
@@ -157,46 +218,43 @@ def getitems(
 		soup = webparser(url)
 
 	dataDump = json.loads(soup.find("script", id="__NEXT_DATA__").string)
-	productIdTree = dataDump["props"]["apolloState"]
+	productIDTree = dataDump["props"]["apolloState"]
 
-	productIds = []
+	productIDs = []
 	if dealurl:
 		# unique child 'CategoryGrid' for json tree:
 		# a deal id + lang + country + total number of items already shown
-		dealId = dealurl.split("/")[-2]
+		dealID = dealurl.split("/")[-2]
 		continueFrom = 0
 		if pagenumber > 1:
 			continueFrom = pagenumber * pagesize - pagesize
-		categoryJs = "CategoryGrid:{}:{}-{}:{}:{}".format(dealId, lang, country, continueFrom, pagesize)
-		for i in productIdTree[categoryJs]["products"]:
-			productIds.append(i["id"])
+		categoryJs = "CategoryGrid:{}:{}-{}:{}:{}".format(
+			dealID, lang, country, continueFrom, pagesize
+		)
+		for i in productIDTree[categoryJs]["products"]:
+			productIDs.append(i["id"])
 	elif query:
-		dealId = query
-		for productId in productIdTree:
+		dealID = query
+		for productID in productIDTree:
 			locale = ":{}-{}".format(lang, country)
-			if productId.startswith("Product") and \
-				(productId.endswith(locale) or productId.endswith(":en-us")):
-				productIds.append(productId)
+			if productID.startswith("Product") and \
+				(productID.endswith(locale) or productID.endswith(":en-us")):
+				productIDs.append(productID)
 
-	locale = lang + country
+	locale = lang + "-" + country
 	noCurrencyReg = re.compile(r"[0-9,.\s]+")
-	connection = sqlite3.connect(DBFILE)
+	connection = sqlite3.connect(dbfile)
 	c = connection.cursor()
-	c.execute(
-		"create table if not exists psfetcher \
-		(id integer primary key autoincrement, titleid blob, title blob, price blob, \
-		discount blob, roundprice real, type blob, deal blob, pagenumber integer, dealid blob, locale text)"
-	)
-
-	for productId in productIds:
-		itemInfo = dataDump["props"]["apolloState"][productId]
+	for productID in productIDs:
+		itemInfo = dataDump["props"]["apolloState"][productID]
 		if query:
 			if not query.lower() in itemInfo["name"].lower():
 				continue
-		priceId = itemInfo["price"]["id"]
-		priceJs = dataDump["props"]["apolloState"][priceId]
+
+		priceID = itemInfo["price"]["id"]
+		priceJson = dataDump["props"]["apolloState"][priceID]
 		try:
-			price = noCurrencyReg.search(priceJs["discountedPrice"]).group()
+			price = noCurrencyReg.search(priceJson["discountedPrice"]).group()
 			price = price.translate(str.maketrans({" ": None, ",": "."}))
 			# fix decimal separator rounding issue: if len after dec. sep. position is >= 3
 			decSepPosition = price.find(".") + 1
@@ -205,16 +263,26 @@ def getitems(
 			roundPrice = round(float(price), 2)
 		except (KeyError, AttributeError, ValueError):
 			roundPrice = 0.1
-		c.execute(
-			"insert into psfetcher (titleid, title, price, roundprice, discount, type, deal, pagenumber, dealid, locale) \
-			values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-				itemInfo["id"], itemInfo["name"].strip(),
-				priceJs["discountedPrice"], roundPrice,
-				str(priceJs["discountText"]),
-				itemInfo["localizedStoreDisplayClassification"], deal, pagenumber, dealId, locale
+
+		platform = ", ".join(itemInfo["platforms"]["json"])
+		if "PS" not in platform:
+			platform = "PS*"
+
+		statement = """
+		insert into psfetcher
+		(titleID, title, price, roundprice, discount,
+		type, deal, pagenumber, dealID, locale, platform)
+		values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		"""
+		c.execute(statement, (
+			itemInfo["id"], itemInfo["name"].strip(),
+			priceJson["discountedPrice"], roundPrice,
+			str(priceJson["discountText"]),
+			itemInfo["localizedStoreDisplayClassification"], deal, pagenumber, dealID, locale, platform
 			)
 		)
 	connection.commit()
+	connection.close()
 
 
 def printitems(itemlist, tlen=0, plen=0, table=False):
@@ -226,542 +294,369 @@ def printitems(itemlist, tlen=0, plen=0, table=False):
 	plen (int): price length value used for justification
 	table (bool): if True, will print table-like results
 	"""
-	header = "{} | {} | Discount".format("Title".ljust(tlen), "Price".ljust(plen))
+	header = "{} | {} | {} | {}".format(
+		"Title".ljust(tlen), "Price".ljust(plen),
+		"Discount", "Platform"
+	)
+	dlen = len("Discount")
 	print(header)
 	for item in itemlist:
 		if table:
 			print("-" * round(len(header)))
-		itemline = "{} | {} | {}".format(
+		itemline = "{} | {} | {} | {}".format(
 			item["title"].ljust(tlen),
 			item["price"].ljust(plen),
-			item["discount"])
+			str(item["discount"]).ljust(dlen),
+			str(item["platform"]))
 		print(itemline)
 
 
-def writetext(
-	itemlist=None, lang=None, country=None, tlen=0, plen=0,
-	table=False, filename=None, filterMessage=None
-):
-	"""Return filename of a file to which all output has been saved.
+def watchlist(dbfile=None, locale=None, command=None, addtitle=None):
+	"""Return None.
 
-	Parameters:
-	itemlist (list): data list of items (dicts)
-	lang (str): 2-letter language code
-	country (str): 2-letter country code
-	tlen (int): title length value used for justification
-	plen (int): price length value used for justification
-	table (bool): if True, will print table-like results
-	filename (str): save output to 'filename'
-	filterMessage (str): a message of applied filters
+	Based on an option, either show titles, add a title, check prices or remove a title.
+
+	dbfile (str): full path to a database file
+	locale (str): language and country codes joined with a hyphen
+	command (str): command to execute (add, check, show, remove)
+	addtitle (str): search and add a title to the watchlist db
 	"""
-	header = "{} | {} | Discount\n".format("Title".ljust(tlen), "Price".ljust(plen))
-	with open(filename, "w") as output:
-		output.write("{}\n".format(filterMessage))
-		output.write(header)
-		for item in itemlist:
-			if table:
-				output.write("-" * round(len(header)) + "\n")
-			itemline = "{} | {} | {}\n".format(
-				item["title"].ljust(tlen),
-				item["price"].ljust(plen),
-				item["discount"])
-			output.write(itemline)
-	return filename
+	connection = sqlite3.connect(dbfile)
+	c = connection.cursor()
+	totalCount, = c.execute("select count(titleID) from watchlist").fetchone()
+	if command == "show" and totalCount != 0:
+		statement = "select length(title) from watchlist order by length(title) desc limit 1"
+		maxTitleLen, = c.execute(statement).fetchone()
+		print("Title".ljust(maxTitleLen), "Store")
+		for title, locale in c.execute("select title, locale from watchlist").fetchall():
+			print(title.ljust(maxTitleLen), locale)
 
-
-def writereddit(
-	itemlist=None, lang=None, country=None,
-	filename=None, filterMessage=None, name=None
-):
-	"""Return filename of a file to which all output has been saved.
-
-	Parameters:
-	itemlist (list): data list of items (dicts)
-	lang (str): 2-letter language code
-	country (str): 2-letter country code
-	filename (str): save output to 'filename'
-	filterMessage (str): a message of applied filters
-	name (str): deal's name
-	"""
-	header = "Title | Price | Discount\n---|---|----"
-	filterMessage = filterMessage + "\n"
-	commentLen = len(header + filterMessage)
-	with open(filename, "w") as output:
-		output.write("{}\n".format(filterMessage))
-		output.write(header)
-		for item in itemlist:
-			itemline = "\n[{}]({}) | {} | {}".format(
-				item["title"],
-				"https://store.playstation.com/{}-{}/product/".format(lang, country) + item["id"],
-				item["price"],
-				item["discount"])
-			output.write(itemline)
-			commentLen += len(itemline)
-			if commentLen > 9800:
-				commentLen = len(header)
-				output.write("\n\n{}".format(header))
-	return filename
-
-
-def writehtml(
-	itemlist=None, lang=None, country=None,
-	filename=None, filterMessage=None, name=None
-):
-	"""Return filename of a file to which all output has been saved.
-
-	Parameters:
-	itemlist (list): data list of items (dicts)
-	lang (str): 2-letter language code
-	country (str): 2-letter country code
-	filename (str): save output to 'filename'
-	filterMessage (str): a message of applied filters
-	name (str): deal's name
-	"""
-	header = (
-		"<!DOCTYPE html>"
-		"\n<html>"
-		"\n<body>"
-		"\n<head>"
-		"\n\t<meta charset=\"utf-8\">"
-		"\n\t<title>%s</title>"
-		"\n</head>"
-		"\n<style>"
-		"\nbody {background-color: #131516;}"
-		"\na {text-decoration: none; color: #21618c;}"
-		"\nh2, h3, h4 {"
-		"\n\tfont-family: courier new;"
-		"\n\tcolor: #99a3a4;"
-		"\n\ttext-align: center;"
-		"\n}"
-		"\ntable {"
-		"\n\tfont-family: courier new;"
-		"\n\tborder-collapse: collapse;"
-		"\n\tcolor: #99a3a4;"
-		"\n\tmargin-left: auto;"
-		"\n\tmargin-right: auto;"
-		"\n}"
-		"\ntd, th {"
-		"\n\ttext-align: left;"
-		"\n\tpadding: 5px;"
-		"\n}"
-		"\ntr:nth-child(even) {"
-		"\n\tbackground-color: #202020;"
-		"\n}"
-		"\n</style>" % name.upper()
-	)
-	heading = "\n<h2>{} ({}-{} STORE)</h2>".format(name.upper(), lang.upper(), country.upper())
-	lowerHeading = "\n<h3>{}</h3>".format(filterMessage)
-	tableHeader = (
-		"\n<table>"
-		"\n\t<tr>\n\t\t<th>Title</th>"
-		"\n\t\t<th>Price</th>"
-		"\n\t\t<th>Discount</th>"
-		"\n\t</tr>"
-	)
-	productUrl = "https://store.playstation.com/{}-{}/product/".format(lang, country)
-	tRow = (
-		"\n\t<tr>\n\t\t<th>"
-		"<a href=\"{}{}\">{}</a></th>"
-		"\n\t\t<th>{}</th>\n\t\t<th>{}</th>\n\t</tr>"
-	)
-	footer = "\n</table>\n</body>\n</html>:"
-	with open(filename, "w") as output:
-		[output.write(i) for i in (header, heading, lowerHeading, tableHeader)]
-		for item in itemlist:
-			output.write(tRow.format(
-				productUrl, item["id"],
-				item["title"], item["price"], item["discount"]
-				)
+	elif command == "check" and totalCount != 0:
+		titleIDs = []
+		locales = []
+		statement = "select titleID, locale from watchlist where locale = ?"
+		for titleID, locale in c.execute(statement, (locale,)).fetchall():
+			titleIDs.append(titleID)
+			locales.append(locale)
+		p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+		p.starmap(itemPrice, zip(
+			repeat(dbfile), titleIDs, locales,
+			repeat("watchlist"), repeat("watchlist")
 			)
-		output.write(footer)
-	return filename
+		)
+		p.close()
+		p.join()
+
+	elif command == "add" and addtitle:
+		c.execute("delete from psfetcher where deal = 'watchlist'")
+		c.execute("update sqlite_sequence set seq=0 where name='psfetcher'")
+		connection.commit()
+
+		lang, country = locale.split("-")
+		getitems(query=addtitle, deal="watchlist", lang=lang, country=country, pagenumber=1, dbfile=dbfile)
+
+		indexConverter = {}
+		statement = "select id, title from psfetcher where deal = 'watchlist'"
+		watchQueryResults = c.execute(statement).fetchall()
+		if not watchQueryResults:
+			return None
+		for ind, IDWithTitle in enumerate(watchQueryResults, start=1):
+			ID = IDWithTitle[0]
+			title = IDWithTitle[1]
+			print(ind, title)
+			indexConverter[ind] = ID
+		del watchQueryResults
+		choices = choiceCheck(maxval=len(indexConverter), attempt=1, inputMessage="enter title's index: ")
+		if not choices:
+			return None
+		# revert back from enumerated indexes to the real ids in the table
+		finalIDs = [str(indexConverter[ind]) for ind in choices]
+		placeholders = "?" * len(finalIDs)
+		placeholders = ",".join(finalIDs)
+		statement = "select title, titleID from psfetcher where deal = 'watchlist' and id in ({})"
+		for title, titleID in c.execute(statement.format(placeholders)).fetchall():
+			statement = "select titleID from watchlist where titleID = ? and locale = ?"
+			if not c.execute(statement, (titleID, locale)).fetchone():
+				statement = "insert into watchlist (titleID, title, locale) values (?, ?, ?)"
+				c.execute(statement, (titleID, title, locale))
+		connection.commit()
+
+	elif command == "remove" and totalCount != 0:
+		for ind, ID, in enumerate(c.execute("select id from watchlist").fetchall(), start=1):
+			c.execute("update watchlist set id = ? where id = ?", (ind, ID[0]))
+
+		maxIDLen, = c.execute("select length(id) from watchlist order by length(id) desc limit 1").fetchone()
+		if maxIDLen == 1:
+			maxIDLen = 2
+		maxTitleLen, = c.execute("select length(title) from watchlist order by length(title) desc limit 1").fetchone()
+		print("ID".ljust(maxIDLen), "Title".ljust(maxTitleLen), "Store")
+		for ID, title, locale in c.execute("select id, title, locale from watchlist"):
+			print(str(ID).ljust(maxIDLen), title.ljust(maxTitleLen), locale)
+		choices = choiceCheck(maxval=totalCount, attempt=1, inputMessage="enter title's index: ")
+		if choices:
+			for ind in choices:
+				c.execute("delete from watchlist where id = ?", (ind,))
+		c.execute("update sqlite_sequence set seq=0 where name='watchlist'")
+		connection.commit()
+
+	connection.close()
 
 
-def writexlsx(
-	itemlist=None, lang=None, country=None,
-	filename=None, filterMessage=None, name=None
-):
-	"""Return filename of a file to which all output has been saved.
+def listStores(conf=None):
+	"""Return None. Print all possible language and country code combinations.
 
 	Parameters:
-	itemlist (list): data list of items (dicts) returned from getitems()
-	deal (str): deal's name
-	lang (str): 2-letter language code
-	country (str): 2-letter country code
-	filename (str): save output to 'filename'
-	filterMessage (str): a message of applied filters
-	name (str): deal's name
+	conf (dict): the first dict, allstores, returned from psconfig.getConf
 	"""
-	wb = openpyxl.Workbook()
-	sheet = wb.active
-	sheet.title = name
-	sheet["A1"] = filterMessage
-	sheet["A2"] = "Title"
-	sheet["B2"] = "Price"
-	sheet["C2"] = "Discount"
-	sheet["D2"] = "Link"
-	productUrl = "https://store.playstation.com/{}-{}/product/".format(lang, country)
-	for ind, item in enumerate(itemlist):
-		ind += 3
-		url = productUrl + item["id"]
-		cells = {"A": item["title"], "B": item["price"], "C": item["discount"], "D": url}
-		for cell, data in cells.items():
-			sheet[cell + str(ind)] = data
-	wb.save(filename)
-	return filename
+	print("language", "|", "country")
+	justVal = len("language")
+	for lang, country in conf.items():
+		line = "{} | {}".format(lang.ljust(justVal), " ".join(country))
+		print(line)
 
 
-if __name__ == "__main__":
-	if not os.path.isfile(CONFIG) or not os.access(CONFIG, os.R_OK):
-		print("ensure you have '{}' with at least read access".format(CONFIG))
-		sys.exit()
+def prelimCheck(
+	country=None, lang=None, minprice=0, maxprice=0,
+	conf=None, sortingList=None, contentTypes=None
+):
+	"""Return 1 if basic sanity check of arguments fails.
 
-	with open(CONFIG, "r") as config:
-		allconf = json.loads(config.read())
-	allstores = {}
-	allcontent = {}
-	for lang in allconf.keys():
-		allstores[lang] = allconf[lang]["country"]
-		allcontent[lang] = allconf[lang]["content"]
-	del allconf
-	countries = [country for sList in allstores.values() for country in sList]
-
-	parser = argparse.ArgumentParser(
-			prog="psfetcher",
-			description="Fetch deals or search for game titles in PS Store",
-			usage="%(prog)s -s xx [option]", add_help=False,
-			formatter_class=argparse.RawTextHelpFormatter)
-	requiredArg = parser.add_argument_group("required argument")
-	optionalArg = parser.add_argument_group("optional arguments")
-	requiredArg.add_argument(
-		"-s", "--store", metavar="xx",
-		type=str, choices=countries,
-		help="2-letter country code"
-	)
-	requiredArg.add_argument(
-		"-l", "--lang", metavar="xx",
-		type=str, choices=list(allstores.keys()),
-		help="2-letter language code"
-	)
-	optionalArg.add_argument(
-		"-a", "--alldeals", action="store_true",
-		help="select all available deals"
-	)
-	optionalArg.add_argument(
-		"-q", "--query", metavar="title", type=str, nargs="+",
-		help="search for a title (page 1 results only)")
-	optionalArg.add_argument(
-		"-f", "--from", dest="min", metavar="N",
-		type=int, default=0,
-		help="title's minimum price"
-	)
-	optionalArg.add_argument(
-		"-u", "--under", dest="max", metavar="N",
-		type=int, default=100000,
-		help="title's maximum price"
-	)
-	optionalArg.add_argument(
-		"--type", nargs='+',
-		choices=["game", "addon", "currency"],
-		help="show only specific content type(s)"
-	)
-	optionalArg.add_argument(
-		"--sort", nargs='+',
-		choices=["price", "title", "discount"],
-		metavar="{price, title, discount}",
-		help="sort results by price, title, or discount"
-	)
-	optionalArg.add_argument(
-		"--reverse", action="store_true",
-		help="reversed --sort results"
-	)
-	optionalArg.add_argument(
-		"-t", "--txt", action="store_const",
-		const=writetext, dest="writetext",
-		help="save results as a text file"
-	)
-	optionalArg.add_argument(
-		"-r", "--reddit", action="store_const",
-		const=writereddit, dest="writereddit",
-		help="save results as a reddit-friendly comment"
-	)
-	optionalArg.add_argument(
-		"-w", "--web", action="store_const",
-		const=writehtml, dest="writehtml",
-		help="save results as an HTML document"
-	)
-	optionalArg.add_argument(
-		"-x", "--xlsx", action="store_const",
-		const=writexlsx, dest="writexlsx",
-		help="save results as an XLSX spreadsheet"
-	)
-	optionalArg.add_argument(
-		"-n", "--noprint", action="store_true",
-		help="don't print the results"
-	)
-	optionalArg.add_argument(
-		"--table", action="store_true",
-		help="table-like printed/saved results"
-	)
-	optionalArg.add_argument(
-		"-i", "--ignore", action="store_true",
-		help="ignore old results"
-	)
-	optionalArg.add_argument(
-		"--list", action="store_true",
-		dest="storeslist",
-		help="list all language and country codes")
-	optionalArg.add_argument(
-		"-v", "--version", action="version",
-		version="%(prog)s 1.0.7",
-		help="show script's version and exit"
-	)
-	optionalArg.add_argument(
-		'-h', '--help', action='help',
-		default=argparse.SUPPRESS,
-		help="show this help message and exit"
-	)
-
-	args = parser.parse_args()
-	country = args.store
-	lang = args.lang
-	argQuery = args.query
-	argSortingList = args.sort
-	argContentTypes = args.type
-	minprice = args.min
-	maxprice = args.max
-	tablePrintSwitch = args.table
-	noPrintSwitch = args.noprint
-	ignoreSwitch = args.ignore
-	reverseSwitch = args.reverse
-	getAllSwitch = args.alldeals
-	writetext = args.writetext
-	writereddit = args.writereddit
-	writehtml = args.writehtml
-	writexlsx = args.writexlsx
-
-	if args.storeslist:
-		print("language", "|", "country")
-		for lang, country in allstores.items():
-			print(lang.ljust(len("language")), "|", " ".join(country))
-		sys.exit()
-
-	if os.path.isfile(PREFERENCES_CONFIG) and os.access(PREFERENCES_CONFIG, os.R_OK):
-		with open(PREFERENCES_CONFIG, "r") as config:
-			try:
-				prefconf = json.loads(config.read())
-			except json.decoder.JSONDecodeError:
-				print("{} doesn't follow JSON syntax".format(PREFERENCES_CONFIG))
-				sys.exit()
-
-			if not lang and prefconf["language"] is not None:
-				lang = prefconf["language"]
-				if lang not in allstores.keys():
-					print("wrong language set in preferences")
-					sys.exit()
-			if not country and prefconf["country"] is not None:
-				country = prefconf["country"]
-				if country not in countries:
-					print("wrong country set in preferences")
-					sys.exit()
-
-	if not country:
-		print("specify the country code")
-		sys.exit()
+	Parameters:
+	country (str): 2-letter country code
+	lang (str): 2-letter language code
+	minpirce (int): title's minimum price
+	maxprice (int): title's maximum price
+	conf (dict): the first dict, allstores, returned from psconfig.getConf
+	sortingList (list): a list of user-applied sorting
+	contentTypes (list): a list of user-picked content types
+	"""
 	if not lang:
 		print("specify the language code")
-		sys.exit()
-	if country not in allstores[lang]:
-		print("can't combine language code '{}' with country code '{}'".format(lang, country))
-		sys.exit()
-	if 0 > minprice or minprice > maxprice or \
-		(minprice > maxprice and maxprice != parser.get_default('max')):
+		return 1
+	if lang not in conf.keys():
+		print("wrong language code specified")
+		return 1
+	if not country:
+		print("specify the country code")
+		return 1
+	if country not in conf[lang]:
+		print("wrong country and language code combination")
+		return 1
+	if 0 > minprice or minprice > maxprice:
 		print("there there now, be a dear and fix those prices")
+		return 1
+	for level in sortingList:
+		if level not in (["price", "title", "discount"]):
+			print("wrong sorting is specified")
+			return 1
+	for level in contentTypes:
+		if level not in (["game", "addon", "currency"]):
+			print("wrong content is specified")
+			return 1
+
+
+def main():
+	"""Psfetcher's main engine. Not meant to be imported."""
+
+	# exit if the main config is not found
+	allstores, allcontent = psconfig.getConf()
+	if not allstores:
 		sys.exit()
 
-	def filenameMaker(name, lang, country, ext=None, query=False):
-		exts = {writereddit: "reddit.txt", writehtml: "html", writexlsx: "xlsx", writetext: "txt"}
-		name = name.replace("- ", "").replace(" ", ".")
-		filename = "{}.{}.{}.{}".format(name, lang, country, exts[ext])
-		if query:
-			filename = "query." + filename
-		return filename.lower()
+	# should a var be added/changed, copy the variable list from psparse
+	country, lang, argCommand, subCommand, addTitle, \
+		argQuery, argSortingList, argContentTypes, minprice, maxprice, \
+		printTableResults, dontPrintResults, ignorePreviousFetch, \
+		reverseResults, getAllDeals, \
+		writetext, writereddit, writehtml, writexlsx, operation = psparse.getVars()
 
-	def getSQL(cursor=True):
-		global DBFILE
-		if cursor:
-			return sqlite3.connect(DBFILE).cursor()
-		return sqlite3.connect(DBFILE)
+	# store-independent functions: list stores, print examples, show user-set preferences, flush db
+	if argCommand and argCommand != "watchlist":
+		funcMap = {
+			"list": listStores, "examples": psinfo.printExamples,
+			"preferences": psconfig.checkPreferences,
+			"flush": pssql.flush, "flushall": pssql.flush
+		}
+		func = funcMap[argCommand]
+		if argCommand == "list":
+			func(conf=allstores)
+		elif argCommand == "flush":
+			func(dbfile=DBFILE)
+		elif argCommand == "flushall":
+			func(dbfile=DBFILE, everything=True)
+		else:
+			func()
+		sys.exit()
 
-	def cleanupOldFetch(deal, dealId, locale):
-		c = getSQL(cursor=False)
-		c.cursor().execute("delete from psfetcher where dealid = ? and locale = ? and deal = ?", (dealId, locale, deal))
-		c.commit()
+	# sanity check
+	exitCode = prelimCheck(
+		country=country, lang=lang, minprice=minprice,
+		maxprice=maxprice, conf=allstores, sortingList=argSortingList,
+		contentTypes=argContentTypes
+	)
+	del allstores
+	if exitCode == 1:
+		sys.exit(1)
 
-	def selectData(deal, dealId, locale):
-		global argSortingList, argContentTypes, allcontent, minprice, maxprice
-		contentMes = None
-		sortMes = None
-
-		priceRangeMes = "price range: "
-		if minprice != parser.get_default('min'):
-			priceRangeMes += "from {} ".format(minprice)
-		if maxprice != parser.get_default('max'):
-			priceRangeMes += "under {}".format(maxprice)
-		if len(priceRangeMes) == 13:
-			priceRangeMes = None
-
-		select = "select title, price, discount, titleid from psfetcher"
-		select += " where roundprice between {} and {}".format(minprice, maxprice)
-		select += " and dealid = '{}' and locale = '{}' and deal = '{}'".format(dealId, locale, deal)
-
-		if argContentTypes:
-			ctypes = []
-			for ctype in argContentTypes:
-				ctypes += allcontent[lang][ctype]
-			placeholders = "?" * len(ctypes)
-			placeholders = ",".join(placeholders)
-			select += " and psfetcher.type in ({})".format(placeholders)
-			contentMes = "content: {}".format(", ".join(argContentTypes))
-		if argSortingList:
-			argSortingList = list(unique_everseen(argSortingList))
-			sortingList = ["roundprice" if i == "price" else i for i in argSortingList]
-			order = {False: " asc", True: " desc"}
-			order = order[reverseSwitch]
-			select += " order by " + "{}, ".format(order).join(sortingList) + order
-			sortMes = "sorted by {}".format(" then by ".join(argSortingList))
-			if reverseSwitch:
-				sortMes += " in reverse"
-
-		try:
-			c = getSQL()
-			titleSelect = "select length(title) from psfetcher where dealid = ? and locale = ? and deal = ? order by length(title) desc limit 1"
-			maxTitleLen, = c.execute(titleSelect, (dealId, locale, deal)).fetchone()
-			priceSelect = "select length(price) from psfetcher where dealid = ? and locale = ? and deal = ? order by length(price) desc limit 1"
-			maxPriceLen, = c.execute(priceSelect, (dealId, locale, deal)).fetchone()
-
-			itemlist = []
-			if argContentTypes:
-				select = c.execute(select, ctypes)
-			else:
-				select = c.execute(select)
-			for title, price, discount, titleid in select.fetchall():
-				rawdata = {}
-				rawdata["title"] = title
-				rawdata["price"] = price
-				rawdata["discount"] = discount
-				rawdata["id"] = titleid
-				itemlist.append(rawdata)
-
-			today = time.strftime("%Y %b %d")
-			filterMessage = "{} titles | generated at {}".format(len(itemlist), today)
-			messages = [m for m in (sortMes, priceRangeMes, contentMes) if m]
-			for message in messages:
-				filterMessage += " | {}".format(message)
-			return itemlist, maxTitleLen, maxPriceLen, filterMessage
-
-		except TypeError:
-			return None, 0, 0, None
-
-	def checkOldData(deal, dealId, locale):
-		try:
-			c = getSQL()
-			oldcountSelect = "select count(title) from psfetcher where dealid = ? and locale = ? and deal = ?"
-			oldcount, = c.execute(oldcountSelect, (dealId, locale, deal)).fetchone()
-			if oldcount > 0:
-				totalpagesSelect = "select max(pagenumber) from psfetcher where dealid = ? and locale = ? and deal = ?"
-				totalpages, = c.execute(totalpagesSelect, (dealId, locale, deal)).fetchone()
-				return oldcount, totalpages
-			return 0, 0
-		except sqlite3.OperationalError:
-			return 0, 0
-
-	# outside due to mp
+	locale = "{}-{}".format(lang, country)
+	pssql.maketables(dbfile=DBFILE)
 	savedMessages = []
 
-	def fullShebang(printQuery=False, printDeal=False):
-		global maxPriceLen, maxTitleLen, data
+	def fullShebang(
+			itemlist=None, itemcount=0, deal=None, isQuery=False, isDeal=False,
+			isWatch=False, tlen=0, plen=0, pages=0, filterMessage=None
+		):
 		funcs = [func for func in (writereddit, writehtml, writexlsx, writetext) if func]
+		exts = {writereddit: "reddit.txt", writehtml: "html", writexlsx: "xlsx", writetext: "txt"}
+
 		for func in funcs:
-			filename = filenameMaker(deal, lang, country, ext=func, query=querySwitch)
-			if func != writetext:
+			filename = deal.replace("- ", "").replace(" ", ".").lower()
+			if isQuery:
+				filename = "query." + filename
+			filename = "{}.{}.{}.{}".format(filename, lang, country, exts[func])
+			filename = filename.replace("..", ".").replace("...", ".")
+			if func == writetext:
 				savedMessage = func(
-					itemlist=data, lang=lang, country=country, name=deal,
-					filename=filename, filterMessage=filterMessage
-				)
-			elif func == writetext:
-				savedMessage = func(
-					itemlist=data, tlen=maxTitleLen, plen=maxPriceLen,
-					lang=lang, country=country, table=tablePrintSwitch,
+					itemlist=itemlist, tlen=tlen, plen=plen,
+					lang=lang, country=country, table=printTableResults,
 					filterMessage=filterMessage, filename=filename
 				)
+			elif func == writereddit:
+				savedMessage = func(
+					itemlist=itemlist, lang=lang, country=country,
+					filename=filename, filterMessage=filterMessage
+				)
+			else:
+				savedMessage = func(
+					itemlist=itemlist, lang=lang, country=country, deal=deal,
+					filename=filename, filterMessage=filterMessage
+				)
+
 			savedMessages.append(savedMessage)
 
-		if not noPrintSwitch:
-			printitems(data, tlen=maxTitleLen, plen=maxPriceLen, table=tablePrintSwitch)
-		if printDeal:
-			printMessage = "fetched {}/{} items from the '{}' deal. pages: {}"
-			printMessage = printMessage.format(len(data), itemcount, deal, pages)
-		elif printQuery:
-			printMessage = "found {} items for '{}' query"
-			printMessage = printMessage.format(len(data), deal)
-		print(printMessage)
+		if not dontPrintResults:
+			printitems(itemlist, tlen=tlen, plen=plen, table=printTableResults)
 
-	try:
-		locale = lang + country
-		if argQuery:
-			query = " ".join(argQuery).split(",")
-			query = [q for q in query if q.strip()]
-			for q in query:
-				deal = dealId = q.strip()
-				querySwitch = True
-				getitems(query=deal, deal=deal, lang=lang, country=country, pagenumber=1)
-				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal, dealId, locale)
-				if data:
-					fullShebang(printQuery=True)
-					if len(query) > 1 and q != query[-1] and not noPrintSwitch:
-						print()
-				cleanupOldFetch(deal, dealId, locale)
-		else:
-			try:
-				deals = getdeals(lang, country, fetchall=getAllSwitch)
-			except IndexError:
-				print("can't fetch anything. likely there are some site code changes.")
-				sys.exit()
+		itemWord = "items"
+		if itemcount == 1:
+			itemWord = "item"
 
-			querySwitch = False
-			p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
-			for deal, dealurl in deals:
-				dealId = dealurl.split("/")[-2]
-				if ignoreSwitch:
-					cleanupOldFetch(deal, dealId, locale)
-					oldcount = 0
-				else:
-					oldcount, totalpages = checkOldData(deal, dealId, locale)
-				if oldcount == 0:
-					itemcount, pages, pageSize = itercount(dealurl)
-					try:
-						p.starmap(getitems, zip(
-							repeat(dealurl), repeat(deal), range(1, pages + 1),
-							repeat(pageSize), repeat(None),
-							repeat(lang), repeat(country),
-							)
+		if isDeal:
+			printMessage = "fetched {}/{} {} from the '{}' deal. pages: {}"
+			printMessage = printMessage.format(len(itemlist), itemcount, itemWord, deal, pages)
+		elif isQuery:
+			printMessage = "found {} {} for '{}' query"
+			printMessage = printMessage.format(itemcount, itemWord, deal)
+		elif isWatch:
+			printMessage = "fetched {} watchlist {}"
+			printMessage = printMessage.format(itemcount, itemWord)
+		return printMessage
+
+	def watchdog(dbfile=None, locale=None, command=None, addtitle=None):
+		watchlist(dbfile=dbfile, locale=locale, command=command, addtitle=addtitle)
+		if command == "check":
+			data, tlen, plen, filterMessage = pssql.mainselect(
+				dbfile=dbfile, deal="watchlist", dealID="watchlist", locale=locale,
+				sortingList=argSortingList, contentTypes=argContentTypes,
+				minprice=minprice, maxprice=maxprice, allcontent=allcontent,
+				lang=lang, country=country, reverseResults=reverseResults
+			)
+			if data:
+				fetchInfo = fullShebang(
+					itemlist=data, itemcount=len(data), deal="watchlist",
+					isWatch=True, filterMessage=filterMessage, tlen=tlen, plen=plen
+				)
+				print(fetchInfo)
+			pssql.cleanup(dbfile=dbfile, deal="watchlist", dealID="watchlist", locale=locale)
+
+	def fetchitem(dbfile=None, rawQuery=[], lang=None, country=None):
+		queries = " ".join(rawQuery).split(",")
+		queries = [q.strip() for q in queries if q.strip()]
+		for query in queries:
+			dealID = query
+			getitems(query=query, deal=query, lang=lang, country=country, pagenumber=1, dbfile=dbfile)
+			data, tlen, plen, filterMessage = pssql.mainselect(
+				dbfile=dbfile, deal=query, dealID=dealID, locale=locale,
+				sortingList=argSortingList, contentTypes=argContentTypes,
+				minprice=minprice, maxprice=maxprice, allcontent=allcontent,
+				lang=lang, country=country, reverseResults=reverseResults
+			)
+			if data:
+				fetchInfo = fullShebang(
+					itemlist=data, itemcount=len(data), deal=query,
+					isQuery=True, filterMessage=filterMessage, tlen=tlen, plen=plen
+				)
+				print(fetchInfo)
+				if len(queries) > 1 and query != queries[-1] and not dontPrintResults:
+					print()
+			pssql.cleanup(dbfile=dbfile, deal=query, dealID=dealID, locale=locale)
+
+	def fetchdeal(dbfile=None, lang=None, country=None, fetchall=None):
+		deals = getdeals(lang, country, fetchall=fetchall)
+		if not deals:
+			sys.exit()
+		p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+		for deal, dealurl in deals:
+			dealID = dealurl.split("/")[-2]
+			if ignorePreviousFetch:
+				pssql.cleanup(dbfile=dbfile, deal=deal, dealID=dealID, locale=locale)
+				totalCountOld = 0
+			else:
+				totalCountOld, totalPagesOld = pssql.oldcount(dbfile=dbfile, deal=deal, dealID=dealID, locale=locale)
+			if totalCountOld == 0:
+				totalCountNow, pages, pageSize = itercount(dealurl)
+				try:
+					p.starmap(getitems, zip(
+						repeat(dealurl), repeat(deal), range(1, pages + 1),
+						repeat(pageSize), repeat(None),
+						repeat(lang), repeat(country), repeat(dbfile)
 						)
-					except TypeError:
-						continue
-				else:
-					itemcount = oldcount
-					pages = totalpages
-				data, maxTitleLen, maxPriceLen, filterMessage = selectData(deal, dealId, locale)
-				if data:
-					fullShebang(printDeal=True)
-					if len(deals) > 1 and deal != deals[-1][0] and not noPrintSwitch:
-						print()
-			p.close()
-			p.join()
+					)
+				except TypeError:
+					continue
+			else:
+				totalCountNow = totalCountOld
+				pages = totalPagesOld
+			data, tlen, plen, filterMessage = pssql.mainselect(
+				dbfile=dbfile, deal=deal, dealID=dealID, locale=locale,
+				sortingList=argSortingList, contentTypes=argContentTypes,
+				minprice=minprice, maxprice=maxprice, allcontent=allcontent,
+				lang=lang, country=country, reverseResults=reverseResults
+			)
+			if data:
+				fetchInfo = fullShebang(
+					itemlist=data, itemcount=totalCountNow, deal=deal, isDeal=True,
+					filterMessage=filterMessage, tlen=tlen, plen=plen, pages=pages
+				)
+				print(fetchInfo)
+				if len(deals) > 1 and deal != deals[-1][0] and not dontPrintResults:
+					print()
+		p.close()
+		p.join()
+	try:
+		if operation == "FETCHDEAL":
+			fetchdeal(dbfile=DBFILE, lang=lang, country=country, fetchall=getAllDeals)
+		elif operation == "FETCHITEM":
+			fetchitem(dbfile=DBFILE, lang=lang, country=country, rawQuery=argQuery)
+		elif operation == "WATCHDOG":
+			watchdog(dbfile=DBFILE, locale=locale, command=subCommand, addtitle=addTitle)
+
 		if savedMessages:
 			print("saved output:")
-			[print(" *", m) for m in savedMessages]
+			for message in savedMessages:
+				print(" *", message)
+
 	except KeyboardInterrupt:
 		print()
 		sys.exit()
+	except EOFError as err:
+		print("\nerror:", err)
+		print("likely a broken pipe")
+		sys.exit()
+	except IndexError:
+		print("can't fetch anything. likely there are some site code changes.")
+		sys.exit()
+
+
+if __name__ == "__main__":
+	main()

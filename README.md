@@ -5,6 +5,7 @@
   - fetch deals
   - search for game titles
   - multi-store support
+  - watchlist - custom list of picked titles
   - sort results by title, price, or discount
   - filter results by setting minimum and/or maximum prices
   - filter results by content type - games and/or addons
@@ -25,12 +26,12 @@
 
  Pass the language code to `-l / --lang` and the country code to `-s / --store`.
 
- By default `-l / --lang` is set to 'en', meaning English; however not all stores support it. To see which language code goes with which country code, use `--list`.
+ By default `-l / --lang` is set to 'en', meaning English, however not all stores support it. Use the `list` command to list possible combinations.
  
- To entirely skip `-l` and `-s` parameters, set both codes in `preferences.json`
+ To entirely skip `-l` and `-s` parameters, set both codes in `preferences.json` (more on this in [Preferences](#preferences)).
 
    ## Deals:
-   To get results of a single deal, enter its index in the interactive mode that will list all deals. To choose more than one deal, separate indexes by space.
+   To get the results of a single deal, enter its index in the interactive mode that will list all deals. To choose more than one deal, separate indexes by space.
 
    To get all current deals, pass the `-a / --alldeals` option to skip the prompt.
 
@@ -39,20 +40,31 @@
     To list all available deals, a single request is sent to https://store.playstation.com/yy-xx/deals.
     While fetching specific deal's results, multiple parallel processes, specifically number of the machine's CPUs,
     crawl through the deal's pages to download titles and prices.
-    However, if more than one deal is chosen, one at a time will be downloaded,
-    but as mentioned before, each specific deal spawns multiple processes to download data.
-
+    However, if more than one deal is chosen, one at a time will be worked on.
+    
    ## Search:
    To search for a game title, pass the argument to `-q / --query`.
 
    - title can be wrapped in quotes or be without them
-   - multiple titles at a time can be queried - separate them by a comma
-   - the query is case-insensitive; however, the queried phrase should be present completely in that order in a possible match
+   - multiple titles should be separated by a comma
+   - the query is case-insensitive, however, the queried phrase should be present completely in that order in a possible match
    - to get better results, use a game's title without "x edition", "dlc", etc., as they will likely be included
-     - e.g., if the game's title is "The Horror of Fetcher: 2020 Game of the Year Edition",
-       and the query is "the horror of fetcher game of the year edition", it will yield no result. "the horror of fetcher" will suffice
-   - the only fetched results are from the first page, as they're the most relevant. 
-    subsequent pages mostly contain items having separate words from the query as their title
+   - the fetched results are from the first page only, as they're the most relevant.
+     subsequent pages mostly contain items having separate words from the query as their title
+     
+  ## Watchlist:
+  The `watchlist` command has 4 main options: `--add`, `--show`, `--check`, and `--remove`.
+  
+   - `--add` takes one argument - game's title - that will be searched for in PS Store and added to the watchlist
+     - a title is not added automatically: its index must be entered in the prompt
+     - separate indexes by space if there's more than one
+   - `--show` prints all current watchlist titles from all stores
+   - `--check` checks prices of watchlist titles tied to the current store
+     - if identical titles are added to multiple stores, change the store to check their prices
+   - `--remove` prints all current watchlist titles from all stores and removes them by their indexes
+     - separate indexes by space if there's more than one
+    
+  Filters, arguments and other options must precede `watchlist` in the command.
 
    ## Filters:
    To narrow results by content type, pass 'game' and/or 'addon' to `--type`. Virtual currency has its own category, 'currency'.
@@ -70,10 +82,10 @@
    ## Sorting:
    - results can be sorted by either price, title, or discount value. More than one sorting level can be used. Pass them to `--sort` only once.
    For example, to sort by price then by title, use `--sort price title`, and not `--sort price --sort title` (the latter will sort only by title)
-   - to reverse the order of sorting, use `--reverse`
+   - to reverse the order of sorting, use `--reverse`.
 
    ## Output operations:
-   By default, results are printed on the terminal. To disable this, use `-n / --noprint` option.
+   By default, results are printed to the terminal. To disable this, use `-n / --noprint` option.
 
    To alter the default printed format to table-like format, use `--table`.
    ### Saving output:
@@ -86,12 +98,27 @@
 
    A Reddit comment, an HTML document and an XLSX spreadsheet will contain direct store links while a plain text file will not.
 
-  ## Misc 
-   PS Store no longer shows deals' written names on https://store.playstation.com/yy-xx/deals. However, names are still present in site code and they are mostly the same for all stores (except for the "All Deals" deal, which is often translated to a store's language). "Games Under x" type of deals are not translated and are generally the same with one confusing bit - the x's currency is USD, even if a store's currency is different.
+  ## Commands:
+  `examples` prints out to the terminal some psfetcher command examples
+  
+  `flush` removes everything from the database (for all stores), leaving only watchlist titles
+  
+  `flushall` removes everything from the database (for all stores)
+  
+  `preferences` prints current preferences set in `preferences.json` in a human-readable format
+  
+  ## Preferences:
+   Most of the main arguments and options can be set in `preferences.json`. Formatting and example can be found in `preferences.json.example`.
    
- All fetched data is saved to a local SQLite database. If a deal is queried multiple times, old data from the previous run will be used (applicable to deals only; search results are always new). To ignore old data and fetch everything again from PS Store, use `-i / --ignore` option. After some time, when a deal is no longer active, it is advised to delete the old database file.
+
+  ## Misc 
+   PS Store no longer shows deals' written names on https://store.playstation.com/yy-xx/deals. However, names are still present in site code and they are mostly the same for all stores (except for the "All Deals" deal, which is often translated to a store's language). "Games Under x" type of deals have one confusing bit - the x's currency is mostly USD, even if a store's currency is different.
+   
+ All fetched data is saved to a local SQLite database. If a deal is queried multiple times and the deal is still active, old data from the previous run will be used (applicable to deals only; search and `watchlist --check` results are new). To ignore old data and fetch everything again, use `-i / --ignore` option.
+ 
+ PS Store rehashes old URLs which are used as deal IDs in the script, which means that old results from an inactive deal could be shown. It is advised to remove old data from the database using the `flush` command if a deal is no longer active to avoid inconsistencies. 
+
+ Not all titles have a platform specified in their tags. Such cases are noted under the platform column as "PS".
  
    ### What's in thoughts but not in the works:
-   - a GUI version
-   - separation by platform (PS4 and PS5). Not useful as of now, as PS5 titles are currently at the minimum
-      - written but not implemented due to the reason above
+   - adding OpenCritic to the HTML version of the output (needs OC's agreement)

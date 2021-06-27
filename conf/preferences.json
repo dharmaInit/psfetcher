@@ -1,0 +1,17 @@
+{
+  "country": null,
+  "language": "en",
+  "minprice": 0,
+  "maxprice": 100000,
+  "content": [],
+  "sorting": [],
+  "sortReverse": false,
+  "tablePrint": false,
+  "dontPrint": false,
+  "ignorePreviousFetch": false,
+  "getAllDeals": false,
+  "saveTXT": false,
+  "saveHTML": false,
+  "saveRDT": false,
+  "saveXLSX": false
+}

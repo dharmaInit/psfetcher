@@ -1,0 +1,27 @@
+{
+  "country": "us",
+  "language": "en",
+  "minprice": 5,
+  "maxprice": 40,
+  "content": 
+    [
+      "game",
+      "addon"
+    ]
+  ,
+  "sorting": 
+    [
+      "price",
+      "title"
+    ]
+  ,
+  "sortReverse": false,
+  "tablePrint": false,
+  "dontPrint": true,
+  "ignorePreviousFetch": false,
+  "getAllDeals": false,
+  "saveTXT": false,
+  "saveHTML": true,
+  "saveRDT": false,
+  "saveXLSX": false
+}

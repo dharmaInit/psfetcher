@@ -43,7 +43,7 @@ def choiceCheck(maxval, attempt=1, inputMessage="enter deal's index: "):
 			print(messagePool[-1])
 			return None
 		print(messagePool[attempt-1])
-		choices = choiceCheck(maxval, attempt=attempt+1)
+		choices = choiceCheck(maxval, attempt=attempt+1, inputMessage=inputMessage)
 	return choices
 
 
@@ -147,7 +147,8 @@ def itemPrice(dbfile=None, titleID=None, locale=None, deal=None, dealID=None):
 	rawdata = soup.select("script", id="mfe-jsonld-tags", type="application/ld+json")
 	jsonData = json.loads(rawdata[11].string)["cache"]
 	jsonKeys = list(jsonData.keys())
-	matchID = "GameCTA:{}".format(titleID)
+	matchIDReg = re.compile(r"GameCTA\S+{}".format(titleID))
+	matchID = matchIDReg.search(" ".join(jsonKeys)).group(0)
 	titleStoreID = [k for k in jsonKeys if matchID in k][0]
 	priceJson = jsonData[titleStoreID]["price"]
 	try:
@@ -502,13 +503,38 @@ def main():
 	pssql.maketables(dbfile=DBFILE)
 	savedMessages = []
 
-	def fullShebang(
-			itemlist=None, itemcount=0, deal=None, isQuery=False, isDeal=False,
-			isWatch=False, tlen=0, plen=0, pages=0, filterMessage=None
-		):
+	def fullShebang(deal=None, dealID=None, itemcount=0, isQuery=False, isDeal=False, isWatch=False, pages=0):
+		itemlist, tlen, plen, filterMessage = pssql.mainselect(
+			dbfile=DBFILE, deal=deal, dealID=dealID, locale=locale,
+			sortingList=argSortingList, contentTypes=argContentTypes,
+			minprice=minprice, maxprice=maxprice, allcontent=allcontent,
+			lang=lang, country=country, reverseResults=reverseResults
+		)
+		if not itemlist:
+			return None
+
+		if not dontPrintResults:
+			printitems(itemlist, tlen=tlen, plen=plen, table=printTableResults)
+
+		itemWord = "items"
+		if itemcount == 1:
+			itemWord = "item"
+		if itemcount == 0:
+			itemcount = len(itemlist)
+
+		if isDeal:
+			printMessage = "fetched {}/{} {} from the '{}' deal. pages: {}"
+			printMessage = printMessage.format(len(itemlist), itemcount, itemWord, deal, pages)
+		elif isQuery:
+			printMessage = "found {} {} for '{}' query"
+			printMessage = printMessage.format(itemcount, itemWord, deal)
+		elif isWatch:
+			printMessage = "fetched {} watchlist {}"
+			printMessage = printMessage.format(itemcount, itemWord)
+		print(printMessage)
+
 		funcs = [func for func in (writereddit, writehtml, writexlsx, writetext) if func]
 		exts = {writereddit: "reddit.txt", writehtml: "html", writexlsx: "xlsx", writetext: "txt"}
-
 		for func in funcs:
 			filename = deal.replace("- ", "").replace(" ", ".").lower()
 			if isQuery:
@@ -531,80 +557,40 @@ def main():
 					itemlist=itemlist, lang=lang, country=country, deal=deal,
 					filename=filename, filterMessage=filterMessage
 				)
-
 			savedMessages.append(savedMessage)
 
-		if not dontPrintResults:
-			printitems(itemlist, tlen=tlen, plen=plen, table=printTableResults)
 
-		itemWord = "items"
-		if itemcount == 1:
-			itemWord = "item"
-
-		if isDeal:
-			printMessage = "fetched {}/{} {} from the '{}' deal. pages: {}"
-			printMessage = printMessage.format(len(itemlist), itemcount, itemWord, deal, pages)
-		elif isQuery:
-			printMessage = "found {} {} for '{}' query"
-			printMessage = printMessage.format(itemcount, itemWord, deal)
-		elif isWatch:
-			printMessage = "fetched {} watchlist {}"
-			printMessage = printMessage.format(itemcount, itemWord)
-		return printMessage
 
 	def watchdog(dbfile=None, locale=None, command=None, addtitle=None):
 		watchlist(dbfile=dbfile, locale=locale, command=command, addtitle=addtitle)
 		if command == "check":
-			data, tlen, plen, filterMessage = pssql.mainselect(
-				dbfile=dbfile, deal="watchlist", dealID="watchlist", locale=locale,
-				sortingList=argSortingList, contentTypes=argContentTypes,
-				minprice=minprice, maxprice=maxprice, allcontent=allcontent,
-				lang=lang, country=country, reverseResults=reverseResults
-			)
-			if data:
-				fetchInfo = fullShebang(
-					itemlist=data, itemcount=len(data), deal="watchlist",
-					isWatch=True, filterMessage=filterMessage, tlen=tlen, plen=plen
-				)
-				print(fetchInfo)
+			fullShebang(deal="watchlist", dealID="watchlist", isWatch=True)
 			pssql.cleanup(dbfile=dbfile, deal="watchlist", dealID="watchlist", locale=locale)
 
 	def fetchitem(dbfile=None, rawQuery=[], lang=None, country=None):
 		queries = " ".join(rawQuery).split(",")
 		queries = [q.strip() for q in queries if q.strip()]
 		for query in queries:
-			dealID = query
 			getitems(query=query, deal=query, lang=lang, country=country, pagenumber=1, dbfile=dbfile)
-			data, tlen, plen, filterMessage = pssql.mainselect(
-				dbfile=dbfile, deal=query, dealID=dealID, locale=locale,
-				sortingList=argSortingList, contentTypes=argContentTypes,
-				minprice=minprice, maxprice=maxprice, allcontent=allcontent,
-				lang=lang, country=country, reverseResults=reverseResults
-			)
-			if data:
-				fetchInfo = fullShebang(
-					itemlist=data, itemcount=len(data), deal=query,
-					isQuery=True, filterMessage=filterMessage, tlen=tlen, plen=plen
-				)
-				print(fetchInfo)
-				if len(queries) > 1 and query != queries[-1] and not dontPrintResults:
-					print()
-			pssql.cleanup(dbfile=dbfile, deal=query, dealID=dealID, locale=locale)
+			fullShebang(deal=query, dealID=query, isQuery=True)
+			if len(queries) > 1 and query != queries[-1] and not dontPrintResults:
+				print()
+			pssql.cleanup(dbfile=dbfile, deal=query, dealID=query, locale=locale)
 
 	def fetchdeal(dbfile=None, lang=None, country=None, fetchall=None):
 		deals = getdeals(lang, country, fetchall=fetchall)
 		if not deals:
-			sys.exit()
+			return None
+
 		p = multiprocessing.Pool(processes=multiprocessing.cpu_count())
 		for deal, dealurl in deals:
 			dealID = dealurl.split("/")[-2]
 			if ignorePreviousFetch:
 				pssql.cleanup(dbfile=dbfile, deal=deal, dealID=dealID, locale=locale)
-				totalCountOld = 0
-			else:
-				totalCountOld, totalPagesOld = pssql.oldcount(dbfile=dbfile, deal=deal, dealID=dealID, locale=locale)
-			if totalCountOld == 0:
-				totalCountNow, pages, pageSize = itercount(dealurl)
+			# if old results are ignored, fall back to default values 0, 0
+			itemcount, pages = pssql.oldcount(dbfile=dbfile, deal=deal, dealID=dealID, locale=locale)
+			if itemcount == 0:
+				itemcount, pages, pageSize = itercount(dealurl)
 				try:
 					p.starmap(getitems, zip(
 						repeat(dealurl), repeat(deal), range(1, pages + 1),
@@ -614,23 +600,9 @@ def main():
 					)
 				except TypeError:
 					continue
-			else:
-				totalCountNow = totalCountOld
-				pages = totalPagesOld
-			data, tlen, plen, filterMessage = pssql.mainselect(
-				dbfile=dbfile, deal=deal, dealID=dealID, locale=locale,
-				sortingList=argSortingList, contentTypes=argContentTypes,
-				minprice=minprice, maxprice=maxprice, allcontent=allcontent,
-				lang=lang, country=country, reverseResults=reverseResults
-			)
-			if data:
-				fetchInfo = fullShebang(
-					itemlist=data, itemcount=totalCountNow, deal=deal, isDeal=True,
-					filterMessage=filterMessage, tlen=tlen, plen=plen, pages=pages
-				)
-				print(fetchInfo)
-				if len(deals) > 1 and deal != deals[-1][0] and not dontPrintResults:
-					print()
+			fullShebang(deal=deal, dealID=dealID, isDeal=True, itemcount=itemcount, pages=pages)
+			if len(deals) > 1 and deal != deals[-1][0] and not dontPrintResults:
+				print()
 		p.close()
 		p.join()
 	try:

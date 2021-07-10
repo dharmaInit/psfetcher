@@ -1,5 +1,19 @@
 # Change Log
 
+## [1.1.1] - 2021-07-10
+
+Site code change adaptation and minor tweaks.
+
+### Changed
+- simplified main function
+- converting discount's null value to string in itemPrice function
+- getting a match ID for a single title is now regex-based in itemPrice function
+
+### Fixed
+- "OSError: [Errno 9] Bad file descriptor" when checking watchlist item's price
+- wrong recursive message when removing or adding a watchlist item
+
+
 ## [1.1.0] - 2021-06-27
 
 New features demanded for the script to be broken into multiple sub-modules.

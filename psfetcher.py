@@ -181,7 +181,7 @@ def itemPrice(dbfile=None, titleID=None, locale=None, deal=None, dealID=None):
 	values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	"""
 	connection.cursor().execute(statement, (
-		titleID, title, price, roundPrice, discount,
+		titleID, title, price, roundPrice, str(discount),
 		category, deal, 1, dealID, locale, platform
 		)
 	)
@@ -558,8 +558,6 @@ def main():
 					filename=filename, filterMessage=filterMessage
 				)
 			savedMessages.append(savedMessage)
-
-
 
 	def watchdog(dbfile=None, locale=None, command=None, addtitle=None):
 		watchlist(dbfile=dbfile, locale=locale, command=command, addtitle=addtitle)
